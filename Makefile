@@ -32,19 +32,24 @@ build: build-cli build-examples
 
 # 构建 CLI 工具
 build-cli:
-	@echo "构建 CLI 工具 (slnc)..."
-	go build -o slnc ./cmd/slnc/
+	# @echo "构建 CLI 工具 (slnc)..."
+	# go build -o slnc ./cmd/slnc/
+	@echo "构建 CLI 工具 (solana-etl)..."
+	go build -o ./build/solana-etl ./cmd/etl/
 
 # 构建示例程序
 build-examples:
 	@echo "构建示例程序..."
-	go build -o example-getBalance ./rpc/examples/getBalance/
-	go build -o example-getAccountInfo ./rpc/examples/getAccountInfo/
+	# go build -o example-getBalance ./rpc/examples/getBalance/
+	# go build -o example-getAccountInfo ./rpc/examples/getAccountInfo/
 
 # 安装到 GOPATH/bin
 install:
-	@echo "安装 CLI 工具到 GOPATH/bin..."
-	go install ./cmd/slnc/
+	# @echo "安装 CLI 工具到 GOPATH/bin..."
+	# go install ./cmd/slnc/
+	@echo "构建 CLI 工具 (solana-etl)..."
+	go build -o ./build/solana-etl ./cmd/etl/
+	sudo mv ./build/solana-etl $(shell go env GOBIN)/
 
 # 清理构建文件
 clean:
