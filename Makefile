@@ -48,8 +48,9 @@ install:
 	# @echo "安装 CLI 工具到 GOPATH/bin..."
 	# go install ./cmd/slnc/
 	@echo "构建 CLI 工具 (solana-etl)..."
-	go build -o ./build/solana-etl ./cmd/etl/
-	sudo mv ./build/solana-etl $(shell go env GOBIN)/
+	# go build -o ./build/solana-etl ./cmd/etl/
+	# sudo mv ./build/solana-etl $(shell go env GOBIN)/
+	go install ./cmd/solana-etl/
 
 # 清理构建文件
 clean:
