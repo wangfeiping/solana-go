@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"os/signal"
 	"strings"
@@ -14,6 +15,8 @@ import (
 	"github.com/gagliardetto/solana-go"
 	"github.com/gagliardetto/solana-go/rpc"
 	"github.com/gagliardetto/solana-go/rpc/ws"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/spf13/cobra"
 )
 
@@ -24,10 +27,54 @@ type Config struct {
 	MintAccounts []string // 解析后的 mint 账户列表
 	Commitment   string
 	Verbose      bool
+	Exporter     string // Prometheus exporter 地址
+}
+
+// Prometheus metrics
+var (
+	transactionsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "solana_etl_transactions_total",
+			Help: "Total number of transactions processed",
+		},
+		[]string{"mint_account", "status", "operation"},
+	)
+
+	currentSlot = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "solana_etl_current_slot",
+			Help: "Current Solana slot being processed",
+		},
+		[]string{"mint_account"},
+	)
+
+	subscriptionsActive = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "solana_etl_subscriptions_active",
+			Help: "Number of active WebSocket subscriptions",
+		},
+		[]string{"mint_account"},
+	)
+
+	connectionStatus = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "solana_etl_connection_status",
+			Help: "WebSocket connection status (1=connected, 0=disconnected)",
+		},
+		[]string{"provider"},
+	)
+)
+
+func init() {
+	// Register metrics
+	prometheus.MustRegister(transactionsTotal)
+	prometheus.MustRegister(currentSlot)
+	prometheus.MustRegister(subscriptionsActive)
+	prometheus.MustRegister(connectionStatus)
 }
 
 var (
-	cfg = &Config{}
+	cfg     = &Config{}
 	rootCmd = &cobra.Command{
 		Use:   "solana-etl",
 		Short: "Solana WebSocket event monitor for mint account transactions",
@@ -44,24 +91,28 @@ func init() {
 	// Add commands
 	rootCmd.AddCommand(startCmd)
 	rootCmd.AddCommand(statusCmd)
-	
+
 	// Global flags for all commands
-	rootCmd.PersistentFlags().StringVarP(&cfg.ProviderURL, "provider", "p", 
-		"wss://api.mainnet-beta.solana.com", 
+	rootCmd.PersistentFlags().StringVarP(&cfg.ProviderURL, "provider", "p",
+		"wss://api.mainnet-beta.solana.com",
 		"Solana WebSocket provider URL")
-	
-	rootCmd.PersistentFlags().Uint64VarP(&cfg.StartBlock, "start-block", "s", 0, 
+
+	rootCmd.PersistentFlags().Uint64VarP(&cfg.StartBlock, "start-block", "s", 0,
 		"Start monitoring from this block number (slot)")
-	
+
 	// 支持多个 mint 账户，用逗号分隔
-	rootCmd.PersistentFlags().StringVarP(&cfg.MintAccount, "mint-account", "m", "", 
+	rootCmd.PersistentFlags().StringVarP(&cfg.MintAccount, "mint-account", "m", "",
 		"Mint account address(es) to monitor (comma-separated for multiple accounts)")
-	
-	rootCmd.PersistentFlags().StringVarP(&cfg.Commitment, "commitment", "c", "confirmed", 
+
+	rootCmd.PersistentFlags().StringVarP(&cfg.Commitment, "commitment", "c", "confirmed",
 		"Commitment level: processed, confirmed, or finalized")
-	
-	rootCmd.PersistentFlags().BoolVarP(&cfg.Verbose, "verbose", "v", false, 
+
+	rootCmd.PersistentFlags().BoolVarP(&cfg.Verbose, "verbose", "v", false,
 		"Enable verbose logging")
+
+	// 添加 exporter 参数
+	rootCmd.PersistentFlags().StringVar(&cfg.Exporter, "exporter", ":20000",
+		"Prometheus exporter address in format ip:port for metrics export")
 }
 
 var startCmd = &cobra.Command{
@@ -87,6 +138,40 @@ func main() {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
+}
+
+// startMetricsServer 启动 Prometheus metrics HTTP 服务器
+func startMetricsServer(ctx context.Context, addr string) {
+	if addr == "" {
+		return
+	}
+
+	log.Printf("Starting Prometheus metrics server on %s", addr)
+
+	mux := http.NewServeMux()
+	mux.Handle("/metrics", promhttp.Handler())
+
+	server := &http.Server{
+		Addr:    addr,
+		Handler: mux,
+	}
+
+	go func() {
+		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Printf("Metrics server error: %v", err)
+		}
+	}()
+
+	// Graceful shutdown
+	go func() {
+		<-ctx.Done()
+		log.Println("Shutting down metrics server...")
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := server.Shutdown(shutdownCtx); err != nil {
+			log.Printf("Error shutting down metrics server: %v", err)
+		}
+	}()
 }
 
 func runStartCommand(cmd *cobra.Command, args []string) {
@@ -120,6 +205,11 @@ func runStartCommand(cmd *cobra.Command, args []string) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	// Start metrics server if exporter is configured
+	if cfg.Exporter != "" {
+		startMetricsServer(ctx, cfg.Exporter)
+	}
+
 	// Handle graceful shutdown
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
@@ -134,6 +224,9 @@ func runStartCommand(cmd *cobra.Command, args []string) {
 	client, err := ws.Connect(ctx, cfg.ProviderURL)
 	if err != nil {
 		log.Fatalf("Failed to connect to WebSocket: %v", err)
+		connectionStatus.WithLabelValues(cfg.ProviderURL).Set(0)
+	} else {
+		connectionStatus.WithLabelValues(cfg.ProviderURL).Set(1)
 	}
 	defer client.Close()
 
@@ -165,10 +258,14 @@ func runStartCommand(cmd *cobra.Command, args []string) {
 		subscriptions = append(subscriptions, subscription)
 		defer subscription.Unsubscribe()
 
+		// Update metrics
+		subscriptionsActive.WithLabelValues(cfg.MintAccounts[i]).Set(1)
+
 		// 为每个订阅启动一个 goroutine
 		wg.Add(1)
 		go func(sub *ws.LogSubscription, mintAccount string, mintIndex int) {
 			defer wg.Done()
+			defer subscriptionsActive.WithLabelValues(mintAccount).Set(0)
 			processSubscription(ctx, sub, mintAccount, mintIndex)
 		}(subscription, cfg.MintAccounts[i], i+1)
 	}
@@ -213,10 +310,14 @@ func processSubscription(ctx context.Context, subscription *ws.LogSubscription, 
 }
 
 func processTransaction(logResult *ws.LogResult, mintAccount string, mintIndex int) {
+	// Update current slot metric
+	currentSlot.WithLabelValues(mintAccount).Set(float64(logResult.Context.Slot))
+
 	// Check if transaction was successful
 	if logResult.Value.Err != nil {
+		transactionsTotal.WithLabelValues(mintAccount, "failed", "unknown").Inc()
 		if cfg.Verbose {
-			log.Printf("❌ Failed transaction for mint [%d] %s: %s (Error: %v)", 
+			log.Printf("❌ Failed transaction for mint [%d] %s: %s (Error: %v)",
 				mintIndex, mintAccount, logResult.Value.Signature.String(), logResult.Value.Err)
 		}
 		return
@@ -226,6 +327,9 @@ func processTransaction(logResult *ws.LogResult, mintAccount string, mintIndex i
 	if logResult.Context.Slot < cfg.StartBlock {
 		return
 	}
+
+	// Update successful transaction metric
+	transactionsTotal.WithLabelValues(mintAccount, "success", "unknown").Inc()
 
 	// Log the transaction details
 	log.Printf("✅ Transaction found for mint [%d] %s:", mintIndex, mintAccount)
@@ -251,16 +355,19 @@ func analyzeTransactionLogs(logs []string, mintAccount string, mintIndex int) {
 		// Look for transfer patterns
 		if contains(logMsg, "Transfer") || contains(logMsg, "transfer") {
 			log.Printf("   🔄 Transfer detected in logs for mint [%d] %s", mintIndex, mintAccount)
+			transactionsTotal.WithLabelValues(mintAccount, "success", "transfer").Inc()
 		}
-		
+
 		// Look for mint patterns
 		if contains(logMsg, "Mint") || contains(logMsg, "mint") {
 			log.Printf("   🪙 Mint operation detected in logs for mint [%d] %s", mintIndex, mintAccount)
+			transactionsTotal.WithLabelValues(mintAccount, "success", "mint").Inc()
 		}
-		
+
 		// Look for burn patterns
 		if contains(logMsg, "Burn") || contains(logMsg, "burn") {
 			log.Printf("   🔥 Burn operation detected in logs for mint [%d] %s", mintIndex, mintAccount)
+			transactionsTotal.WithLabelValues(mintAccount, "success", "burn").Inc()
 		}
 	}
 }
@@ -302,7 +409,7 @@ func runStatusCommand(cmd *cobra.Command, args []string) {
 	if err != nil {
 		log.Printf("❌ Failed to get epoch info: %v", err)
 	} else {
-		log.Printf("📅 Epoch: %d, Slot Index: %d, Slots in Epoch: %d", 
+		log.Printf("📅 Epoch: %d, Slot Index: %d, Slots in Epoch: %d",
 			epochInfo.Epoch, epochInfo.SlotIndex, epochInfo.SlotsInEpoch)
 	}
 
@@ -310,11 +417,11 @@ func runStatusCommand(cmd *cobra.Command, args []string) {
 	if cfg.MintAccount != "" {
 		// Parse mint accounts
 		cfg.MintAccounts = parseMintAccounts(cfg.MintAccount)
-		
+
 		log.Printf("\nChecking %d mint account(s):", len(cfg.MintAccounts))
 		for i, mintAccount := range cfg.MintAccounts {
 			log.Printf("\n[%d] Checking mint account: %s", i+1, mintAccount)
-			
+
 			mintPubkey, err := solana.PublicKeyFromBase58(mintAccount)
 			if err != nil {
 				log.Printf("❌ Invalid mint account address: %v", err)
@@ -337,6 +444,11 @@ func runStatusCommand(cmd *cobra.Command, args []string) {
 	} else {
 		log.Println("\n💡 Use -m or --mint-account to check specific mint accounts")
 	}
+
+	// Display exporter info
+	if cfg.Exporter != "" {
+		log.Printf("\n📊 Prometheus metrics available at: http://%s/metrics", cfg.Exporter)
+	}
 }
 
 // parseMintAccounts 解析逗号分隔的 mint 账户字符串
@@ -344,28 +456,28 @@ func parseMintAccounts(mintAccountStr string) []string {
 	if mintAccountStr == "" {
 		return nil
 	}
-	
+
 	// 按逗号分割并清理空白字符
 	accounts := strings.Split(mintAccountStr, ",")
 	result := make([]string, 0, len(accounts))
-	
+
 	for _, account := range accounts {
 		account = strings.TrimSpace(account)
 		if account != "" {
 			result = append(result, account)
 		}
 	}
-	
+
 	return result
 }
 
 func contains(s, substr string) bool {
-	return len(s) >= len(substr) && 
-		   (s == substr || 
-		    (len(s) > len(substr) && 
-		     (s[:len(substr)] == substr || 
-		      s[len(s)-len(substr):] == substr || 
-		      findSubstring(s, substr))))
+	return len(s) >= len(substr) &&
+		(s == substr ||
+			(len(s) > len(substr) &&
+				(s[:len(substr)] == substr ||
+					s[len(s)-len(substr):] == substr ||
+					findSubstring(s, substr))))
 }
 
 func findSubstring(s, substr string) bool {

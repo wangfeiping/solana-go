@@ -1,4 +1,5 @@
 .idea
+build/
 dist/
 rpc/debug-utils.go
 
