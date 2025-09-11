@@ -13,9 +13,9 @@ import (
 	"time"
 
 	"github.com/gagliardetto/solana-go"
+	"github.com/gagliardetto/solana-go/etl/exporter"
 	"github.com/gagliardetto/solana-go/rpc"
 	"github.com/gagliardetto/solana-go/rpc/ws"
-	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/spf13/cobra"
 )
@@ -30,52 +30,8 @@ type Config struct {
 	Exporter     string // Prometheus exporter 地址
 }
 
-const (
-	PREFIX = "etl"
-)
-
-// Prometheus metrics
-var (
-	transactionsTotal = prometheus.NewCounterVec(
-		prometheus.CounterOpts{
-			Name: fmt.Sprintf("%s_transactions_total", PREFIX),
-			Help: "Total number of transactions processed",
-		},
-		[]string{"chain", "mint_account", "status", "operation"},
-	)
-
-	blockHeight = prometheus.NewGaugeVec(
-		prometheus.GaugeOpts{
-			Name: fmt.Sprintf("%s_block_height", PREFIX),
-			Help: "Latest block height from transactions",
-		},
-		[]string{"chain"},
-	)
-
-	subscriptionsActive = prometheus.NewGaugeVec(
-		prometheus.GaugeOpts{
-			Name: fmt.Sprintf("%s_subscriptions_active", PREFIX),
-			Help: "Number of active WebSocket subscriptions",
-		},
-		[]string{"chain"},
-	)
-
-	connectionStatus = prometheus.NewGaugeVec(
-		prometheus.GaugeOpts{
-			Name: fmt.Sprintf("%s_connection_status", PREFIX),
-			Help: "WebSocket connection status (1=connected, 0=disconnected)",
-		},
-		[]string{"chain"},
-	)
-)
-
-func init() {
-	// Register metrics
-	prometheus.MustRegister(transactionsTotal)
-	prometheus.MustRegister(blockHeight)
-	prometheus.MustRegister(subscriptionsActive)
-	prometheus.MustRegister(connectionStatus)
-}
+// Global metrics instance
+var metrics *exporter.Metrics
 
 var (
 	cfg     = &Config{}
@@ -138,6 +94,9 @@ the network status and mint account details.`,
 }
 
 func main() {
+	// Initialize metrics
+	metrics = exporter.NewMetrics()
+
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
@@ -228,9 +187,9 @@ func runStartCommand(cmd *cobra.Command, args []string) {
 	client, err := ws.Connect(ctx, cfg.ProviderURL)
 	if err != nil {
 		log.Fatalf("Failed to connect to WebSocket: %v", err)
-		connectionStatus.WithLabelValues("solana").Set(0)
+		metrics.SetConnectionStatus("solana", 0)
 	} else {
-		connectionStatus.WithLabelValues("solana").Set(1)
+		metrics.SetConnectionStatus("solana", 1)
 	}
 	defer client.Close()
 
@@ -263,13 +222,13 @@ func runStartCommand(cmd *cobra.Command, args []string) {
 		defer subscription.Unsubscribe()
 
 		// Update metrics
-		subscriptionsActive.WithLabelValues("solana").Set(1)
+		metrics.SetSubscriptionActive("solana", 1)
 
 		// 为每个订阅启动一个 goroutine
 		wg.Add(1)
 		go func(sub *ws.LogSubscription, mintAccount string, mintIndex int) {
 			defer wg.Done()
-			defer subscriptionsActive.WithLabelValues("solana").Set(0)
+			defer metrics.SetSubscriptionActive("solana", 0)
 			processSubscription(ctx, sub, mintAccount, mintIndex)
 		}(subscription, cfg.MintAccounts[i], i+1)
 	}
@@ -317,11 +276,11 @@ func processTransaction(logResult *ws.LogResult, mintAccount string, mintIndex i
 	// 更新区块高度监控指标
 	// 在 Solana 中，slot 和 block height 是相关的概念
 	// 这里使用 slot 作为区块高度的近似值
-	blockHeight.WithLabelValues("solana").Set(float64(logResult.Context.Slot))
+	metrics.UpdateBlockHeight("solana", float64(logResult.Context.Slot))
 
 	// Check if transaction was successful
 	if logResult.Value.Err != nil {
-		transactionsTotal.WithLabelValues("solana", mintAccount, "failed", "unknown").Inc()
+		metrics.RecordTransaction("solana", mintAccount, "failed", "unknown")
 		if cfg.Verbose {
 			log.Printf("❌ Failed transaction for mint [%d] %s: %s (Error: %v)",
 				mintIndex, mintAccount, logResult.Value.Signature.String(), logResult.Value.Err)
@@ -335,7 +294,7 @@ func processTransaction(logResult *ws.LogResult, mintAccount string, mintIndex i
 	}
 
 	// Update successful transaction metric
-	transactionsTotal.WithLabelValues("solana", mintAccount, "success", "unknown").Inc()
+	metrics.RecordTransaction("solana", mintAccount, "success", "unknown")
 
 	// Log the transaction details
 	log.Printf("✅ Transaction found for mint [%d] %s:", mintIndex, mintAccount)
@@ -362,19 +321,19 @@ func analyzeTransactionLogs(logs []string, mintAccount string, mintIndex int) {
 		// Look for transfer patterns
 		if contains(logMsg, "Transfer") || contains(logMsg, "transfer") {
 			log.Printf("   🔄 Transfer detected in logs for mint [%d] %s", mintIndex, mintAccount)
-			transactionsTotal.WithLabelValues("solana", mintAccount, "success", "transfer").Inc()
+			metrics.RecordTransaction("solana", mintAccount, "success", "transfer")
 		}
 
 		// Look for mint patterns
 		if contains(logMsg, "Mint") || contains(logMsg, "mint") {
 			log.Printf("   🪙 Mint operation detected in logs for mint [%d] %s", mintIndex, mintAccount)
-			transactionsTotal.WithLabelValues("solana", mintAccount, "success", "mint").Inc()
+			metrics.RecordTransaction("solana", mintAccount, "success", "mint")
 		}
 
 		// Look for burn patterns
 		if contains(logMsg, "Burn") || contains(logMsg, "burn") {
-			log.Printf("   🔥 Burn operation detected in logs for mint [%d] %s", mintIndex, mintAccount)
-			transactionsTotal.WithLabelValues("solana", mintAccount, "success", "burn").Inc()
+			log.Printf("   �� Burn operation detected in logs for mint [%d] %s", mintIndex, mintAccount)
+			metrics.RecordTransaction("solana", mintAccount, "success", "burn")
 		}
 	}
 }
