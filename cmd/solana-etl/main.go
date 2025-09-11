@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"regexp"
 	"strings"
 	"sync"
 	"syscall"
@@ -288,20 +289,47 @@ func processTransaction(logResult *ws.LogResult, mintAccount string, mintIndex i
 		return
 	}
 
-	// Check if we're past the start block
-	if logResult.Context.Slot < cfg.StartBlock {
-		return
-	}
+	// // Check if we're past the start block
+	// if logResult.Context.Slot < cfg.StartBlock {
+	// 	return
+	// }
 
 	// Update successful transaction metric
 	metrics.RecordTransaction("solana", mintAccount, "success", "unknown")
 
 	// Log the transaction details
-	log.Printf("✅ Transaction found for mint [%d] %s:", mintIndex, mintAccount)
+	// log.Printf("✅ Transaction found for mint [%d] %s:", mintIndex, mintAccount)
 	log.Printf("   Signature: %s", logResult.Value.Signature.String())
-	log.Printf("   Slot: %d", logResult.Context.Slot)
+	// log.Printf("   Slot: %d", logResult.Context.Slot)
 	log.Printf("   Block Height: %d", logResult.Context.Slot)
-	log.Printf("   Timestamp: %s", time.Now().Format(time.RFC3339))
+	// log.Printf("   Timestamp: %s", time.Now().Format(time.RFC3339))
+
+	// Parse transfer information from logs
+	transfers := parseTransferFromLogs(logResult.Value.Logs)
+	if len(transfers) > 0 {
+		// log.Printf("%d ", logResult.Context.Slot)
+		log.Printf("   💸 Transfer Details:")
+		for i, transfer := range transfers {
+			log.Printf("     Transfer [%d]:", i+1)
+			log.Printf("       From: %s (%s)", formatAddress(transfer.From), transfer.From)
+			log.Printf("       To: %s (%s)", formatAddress(transfer.To), transfer.To)
+			if transfer.Amount != "" {
+				log.Printf("       Amount: %s", transfer.Amount)
+			}
+			if transfer.Mint != "" {
+				log.Printf("       Mint: %s (%s)", formatAddress(transfer.Mint), transfer.Mint)
+			}
+		}
+	}
+
+	// Parse and display all account addresses involved
+	addresses := parseAccountAddresses(logResult.Value.Logs)
+	if len(addresses) > 0 {
+		log.Printf("   📋 Account Addresses:")
+		for i, addr := range addresses {
+			log.Printf("     [%d] %s (%s)", i+1, formatAddress(addr), addr)
+		}
+	}
 
 	if cfg.Verbose && len(logResult.Value.Logs) > 0 {
 		log.Printf("   Logs:")
@@ -453,4 +481,140 @@ func findSubstring(s, substr string) bool {
 		}
 	}
 	return false
+}
+
+// TransferInfo contains parsed transfer information
+type TransferInfo struct {
+	From   string
+	To     string
+	Amount string
+	Mint   string
+}
+
+// parseTransferFromLogs extracts transfer information from transaction logs
+func parseTransferFromLogs(logs []string) []TransferInfo {
+	var transfers []TransferInfo
+
+	// Common patterns for transfer logs in Solana
+	patterns := []struct {
+		name    string
+		pattern *regexp.Regexp
+	}{
+		{
+			name:    "spl_token_transfer",
+			pattern: regexp.MustCompile(`Transfer (\d+) tokens from ([A-Za-z0-9]{32,44}) to ([A-Za-z0-9]{32,44})`),
+		},
+		{
+			name:    "spl_token_transfer_with_mint",
+			pattern: regexp.MustCompile(`Transfer (\d+) tokens from ([A-Za-z0-9]{32,44}) to ([A-Za-z0-9]{32,44}) for mint ([A-Za-z0-9]{32,44})`),
+		},
+		{
+			name:    "sol_transfer",
+			pattern: regexp.MustCompile(`Transfer (\d+) lamports from ([A-Za-z0-9]{32,44}) to ([A-Za-z0-9]{32,44})`),
+		},
+		{
+			name:    "token_transfer_instruction",
+			pattern: regexp.MustCompile(`Program log: Transfer: from ([A-Za-z0-9]{32,44}) to ([A-Za-z0-9]{32,44}) amount (\d+)`),
+		},
+		{
+			name:    "spl_token_instruction",
+			pattern: regexp.MustCompile(`Program TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA invoke \[1\]: Transfer from ([A-Za-z0-9]{32,44}) to ([A-Za-z0-9]{32,44}) amount (\d+)`),
+		},
+	}
+
+	for _, logMsg := range logs {
+		for _, pattern := range patterns {
+			matches := pattern.pattern.FindStringSubmatch(logMsg)
+			if len(matches) >= 4 {
+				transfer := TransferInfo{}
+
+				switch pattern.name {
+				case "spl_token_transfer":
+					transfer.Amount = matches[1]
+					transfer.From = matches[2]
+					transfer.To = matches[3]
+				case "spl_token_transfer_with_mint":
+					transfer.Amount = matches[1]
+					transfer.From = matches[2]
+					transfer.To = matches[3]
+					transfer.Mint = matches[4]
+				case "sol_transfer":
+					transfer.Amount = matches[1]
+					transfer.From = matches[2]
+					transfer.To = matches[3]
+				case "token_transfer_instruction":
+					transfer.From = matches[1]
+					transfer.To = matches[2]
+					transfer.Amount = matches[3]
+				case "spl_token_instruction":
+					transfer.From = matches[1]
+					transfer.To = matches[2]
+					transfer.Amount = matches[3]
+				}
+
+				if transfer.From != "" && transfer.To != "" {
+					transfers = append(transfers, transfer)
+				}
+			}
+		}
+	}
+
+	return transfers
+}
+
+// parseAccountAddresses extracts account addresses from transaction logs
+func parseAccountAddresses(logs []string) []string {
+	var addresses []string
+	addressSet := make(map[string]bool)
+
+	// Pattern to match Solana addresses (32-44 characters, base58)
+	addressPattern := regexp.MustCompile(`[1-9A-HJ-NP-Za-km-z]{32,44}`)
+
+	for _, logMsg := range logs {
+		matches := addressPattern.FindAllString(logMsg, -1)
+		for _, match := range matches {
+			// Filter out common non-address patterns
+			if !isCommonNonAddress(match) && !addressSet[match] {
+				addresses = append(addresses, match)
+				addressSet[match] = true
+			}
+		}
+	}
+
+	return addresses
+}
+
+// isCommonNonAddress checks if a string is likely not an address
+func isCommonNonAddress(s string) bool {
+	commonNonAddresses := []string{
+		"11111111111111111111111111111111",             // System program
+		"TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",  // Token program
+		"ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL", // Associated token program
+		"11111111111111111111111111111112",             // System program (alternative)
+	}
+
+	for _, nonAddr := range commonNonAddresses {
+		if s == nonAddr {
+			return true
+		}
+	}
+
+	// Check if it's too short or contains invalid characters
+	if len(s) < 32 || len(s) > 44 {
+		return true
+	}
+
+	return false
+}
+
+// formatAddress shortens an address for display
+func formatAddress(address string) string {
+	// if len(address) <= 12 {
+	// 	return address
+	// }
+	// return address[:4] + "..." + address[len(address)-4:]
+	if len(address) <= 6 {
+		return address
+	}
+	return address[len(address)-6:]
 }
