@@ -34,6 +34,9 @@ type Config struct {
 // Global metrics instance
 var metrics *exporter.Metrics
 
+// Global RPC client for getting transaction details
+var rpcClient *rpc.Client
+
 var (
 	cfg     = &Config{}
 	rootCmd = &cobra.Command{
@@ -164,6 +167,16 @@ func runStartCommand(cmd *cobra.Command, args []string) {
 	for i, mintAccount := range cfg.MintAccounts {
 		log.Printf("  [%d] %s", i+1, mintAccount)
 	}
+
+	// Initialize RPC client for getting transaction details
+	rpcURL := cfg.ProviderURL
+	if rpcURL[:3] == "wss" {
+		rpcURL = "https" + rpcURL[3:]
+	} else if rpcURL[:2] == "ws" {
+		rpcURL = "http" + rpcURL[2:]
+	}
+	rpcClient = rpc.New(rpcURL)
+	log.Printf("Initialized RPC client: %s", rpcURL)
 
 	// Create context with cancellation
 	ctx, cancel := context.WithCancel(context.Background())
@@ -305,7 +318,22 @@ func processTransaction(logResult *ws.LogResult, mintAccount string, mintIndex i
 	// log.Printf("   Timestamp: %s", time.Now().Format(time.RFC3339))
 
 	// Parse transfer information from logs
-	transfers := parseTransferFromLogs(logResult.Value.Logs)
+	// Get complete transaction details including from/to addresses
+	transfers := getTransactionDetails(logResult.Value.Signature, logResult.Value.Logs)
+
+	// Add debug logging
+	if cfg.Verbose {
+		log.Printf("   🔍 Debug: Found %d transfers from parsing", len(transfers))
+		if len(transfers) == 0 {
+			log.Printf("   🔍 Debug: No transfers found, checking for TransferChecked instruction...")
+			for i, logMsg := range logResult.Value.Logs {
+				if strings.Contains(logMsg, "TransferChecked") {
+					log.Printf("    Debug: Found TransferChecked in log [%d]: %s", i+1, logMsg)
+				}
+			}
+		}
+	}
+
 	if len(transfers) > 0 {
 		// log.Printf("%d ", logResult.Context.Slot)
 		log.Printf("   💸 Transfer Details:")
@@ -520,6 +548,11 @@ func parseTransferFromLogs(logs []string) []TransferInfo {
 			name:    "spl_token_instruction",
 			pattern: regexp.MustCompile(`Program TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA invoke \[1\]: Transfer from ([A-Za-z0-9]{32,44}) to ([A-Za-z0-9]{32,44}) amount (\d+)`),
 		},
+		// New: TransferChecked instruction pattern
+		{
+			name:    "transfer_checked_instruction",
+			pattern: regexp.MustCompile(`Program log: Instruction: TransferChecked`),
+		},
 	}
 
 	for _, logMsg := range logs {
@@ -550,6 +583,11 @@ func parseTransferFromLogs(logs []string) []TransferInfo {
 					transfer.From = matches[1]
 					transfer.To = matches[2]
 					transfer.Amount = matches[3]
+				case "transfer_checked_instruction":
+					// TransferChecked instruction detected, need to get details from RPC
+					transfer.From = "detected"
+					transfer.To = "detected"
+					transfer.Amount = "detected"
 				}
 
 				if transfer.From != "" && transfer.To != "" {
@@ -617,4 +655,179 @@ func formatAddress(address string) string {
 		return address
 	}
 	return address[len(address)-6:]
+}
+
+// getTransactionDetails gets complete transfer details from logs and RPC
+func getTransactionDetails(signature solana.Signature, logs []string) []TransferInfo {
+	var transfers []TransferInfo
+
+	// First try to parse from logs
+	transfers = parseTransferFromLogs(logs)
+
+	// If log parsing failed or found TransferChecked, try to get details from RPC
+	if (len(transfers) == 0 || hasTransferCheckedInstruction(logs)) && rpcClient != nil {
+		if cfg.Verbose {
+			log.Printf("    Debug: Attempting to get transaction details from RPC...")
+		}
+		rpcTransfers := getTransferDetailsFromRPC(signature)
+		if len(rpcTransfers) > 0 {
+			transfers = rpcTransfers
+			if cfg.Verbose {
+				log.Printf("   🔍 Debug: Successfully got %d transfers from RPC", len(transfers))
+			}
+		} else {
+			if cfg.Verbose {
+				log.Printf("   🔍 Debug: Failed to get transfers from RPC")
+			}
+		}
+	}
+
+	return transfers
+}
+
+// hasTransferCheckedInstruction checks if logs contain TransferChecked instruction
+func hasTransferCheckedInstruction(logs []string) bool {
+	for _, logMsg := range logs {
+		if strings.Contains(logMsg, "Instruction: TransferChecked") {
+			return true
+		}
+	}
+	return false
+}
+
+// getTransferDetailsFromRPC gets transfer details from RPC transaction data
+func getTransferDetailsFromRPC(signature solana.Signature) []TransferInfo {
+	var transfers []TransferInfo
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// Get complete transaction information
+	tx, err := rpcClient.GetTransaction(ctx, signature, &rpc.GetTransactionOpts{
+		Encoding:                       solana.EncodingBase64,
+		Commitment:                     rpc.CommitmentConfirmed,
+		MaxSupportedTransactionVersion: &[]uint64{0}[0],
+	})
+	if err != nil {
+		if cfg.Verbose {
+			log.Printf("   ⚠️  Failed to get transaction details: %v", err)
+		}
+		return transfers
+	}
+
+	if tx == nil || tx.Transaction == nil {
+		if cfg.Verbose {
+			log.Printf("   ⚠️  Transaction envelope is nil")
+		}
+		return transfers
+	}
+
+	// Parse transaction account information
+	transaction, err := tx.Transaction.GetTransaction()
+	if err != nil {
+		if cfg.Verbose {
+			log.Printf("   ⚠️  Failed to get transaction from envelope: %v", err)
+		}
+		return transfers
+	}
+
+	if transaction == nil {
+		if cfg.Verbose {
+			log.Printf("   ⚠️  Transaction is nil")
+		}
+		return transfers
+	}
+
+	// Message is a struct, not a pointer, so we don't need to check for nil
+	// Get account list
+	accounts := transaction.Message.AccountKeys
+	if len(accounts) < 2 {
+		if cfg.Verbose {
+			log.Printf("   ⚠️  Not enough accounts in transaction: %d", len(accounts))
+		}
+		return transfers
+	}
+
+	if cfg.Verbose {
+		log.Printf("    Debug: Transaction has %d accounts", len(accounts))
+		for i, account := range accounts {
+			log.Printf("   🔍 Debug: Account [%d]: %s", i, account.String())
+		}
+	}
+
+	// Find SPL Token transfer instructions
+	for i, instruction := range transaction.Message.Instructions {
+		if instruction.ProgramIDIndex < uint16(len(accounts)) {
+			programID := accounts[instruction.ProgramIDIndex]
+
+			if cfg.Verbose {
+				log.Printf("   🔍 Debug: Instruction [%d] program: %s", i, programID.String())
+			}
+
+			// Check if it's SPL Token program
+			if programID.String() == "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA" {
+				if cfg.Verbose {
+					log.Printf("   🔍 Debug: Found SPL Token instruction with %d accounts", len(instruction.Accounts))
+				}
+
+				// Convert solana.CompiledInstruction to rpc.CompiledInstruction
+				rpcInstruction := rpc.CompiledInstruction{
+					ProgramIDIndex: instruction.ProgramIDIndex,
+					Accounts:       instruction.Accounts,
+					Data:           instruction.Data,
+				}
+				transfer := parseSPLTokenInstruction(rpcInstruction, accounts)
+				if transfer.From != "" && transfer.To != "" {
+					transfers = append(transfers, transfer)
+					if cfg.Verbose {
+						log.Printf("   🔍 Debug: Parsed transfer: %s -> %s, amount: %s",
+							transfer.From, transfer.To, transfer.Amount)
+					}
+				}
+			}
+		}
+	}
+
+	return transfers
+}
+
+// parseSPLTokenInstruction parses SPL Token instruction to extract transfer info
+func parseSPLTokenInstruction(instruction rpc.CompiledInstruction, accounts []solana.PublicKey) TransferInfo {
+	transfer := TransferInfo{}
+
+	// SPL Token TransferChecked instruction format:
+	// 0: source (token account)
+	// 1: mint (mint account)
+	// 2: destination (token account)
+	// 3: authority (owner)
+	// 4: signers (if any)
+
+	if len(instruction.Accounts) >= 3 {
+		// Get source and destination accounts
+		if int(instruction.Accounts[0]) < len(accounts) {
+			transfer.From = accounts[instruction.Accounts[0]].String()
+		}
+		if int(instruction.Accounts[2]) < len(accounts) {
+			transfer.To = accounts[instruction.Accounts[2]].String()
+		}
+		if len(instruction.Accounts) >= 2 && int(instruction.Accounts[1]) < len(accounts) {
+			transfer.Mint = accounts[instruction.Accounts[1]].String()
+		}
+
+		// Try to parse amount from instruction data
+		if len(instruction.Data) >= 9 {
+			// TransferChecked instruction data format: instruction type(1 byte) + amount(8 bytes)
+			amount := uint64(instruction.Data[1]) |
+				uint64(instruction.Data[2])<<8 |
+				uint64(instruction.Data[3])<<16 |
+				uint64(instruction.Data[4])<<24 |
+				uint64(instruction.Data[5])<<32 |
+				uint64(instruction.Data[6])<<40 |
+				uint64(instruction.Data[7])<<48 |
+				uint64(instruction.Data[8])<<56
+			transfer.Amount = fmt.Sprintf("%d", amount)
+		}
+	}
+
+	return transfer
 }
