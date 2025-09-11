@@ -357,18 +357,19 @@ func processTransaction(logResult *ws.LogResult, mintAccount string, mintIndex i
 	}
 
 	// Parse and display all account addresses involved
-	addresses := parseAccountAddresses(logResult.Value.Logs)
-	if len(addresses) > 0 {
-		log.Printf("   📋 Account Addresses:")
-		for i, addr := range addresses {
-			log.Printf("     [%d] %s (%s)", i+1, formatAddress(addr), addr)
+	if cfg.Verbose {
+		addresses := parseAccountAddresses(logResult.Value.Logs)
+		if len(addresses) > 0 {
+			log.Printf("   📋 Account Addresses:")
+			for i, addr := range addresses {
+				log.Printf("     [%d] %s (%s)", i+1, formatAddress(addr), addr)
+			}
 		}
-	}
-
-	if cfg.Verbose && len(logResult.Value.Logs) > 0 {
-		log.Printf("   Logs:")
-		for i, logMsg := range logResult.Value.Logs {
-			log.Printf("     [%d] %s", i+1, logMsg)
+		if len(logResult.Value.Logs) > 0 {
+			log.Printf("   Logs:")
+			for i, logMsg := range logResult.Value.Logs {
+				log.Printf("     [%d] %s", i+1, logMsg)
+			}
 		}
 	}
 
@@ -386,17 +387,17 @@ func analyzeTransactionLogs(logs []string, mintAccount string, mintIndex int) {
 			metrics.RecordTransaction("solana", mintAccount, "success", "transfer")
 		}
 
-		// Look for mint patterns
-		if contains(logMsg, "Mint") || contains(logMsg, "mint") {
-			log.Printf("   🪙 Mint operation detected in logs for mint [%d] %s", mintIndex, mintAccount)
-			metrics.RecordTransaction("solana", mintAccount, "success", "mint")
-		}
+		// // Look for mint patterns
+		// if contains(logMsg, "Mint") || contains(logMsg, "mint") {
+		// 	log.Printf("   🪙 Mint operation detected in logs for mint [%d] %s", mintIndex, mintAccount)
+		// 	metrics.RecordTransaction("solana", mintAccount, "success", "mint")
+		// }
 
-		// Look for burn patterns
-		if contains(logMsg, "Burn") || contains(logMsg, "burn") {
-			log.Printf("   �� Burn operation detected in logs for mint [%d] %s", mintIndex, mintAccount)
-			metrics.RecordTransaction("solana", mintAccount, "success", "burn")
-		}
+		// // Look for burn patterns
+		// if contains(logMsg, "Burn") || contains(logMsg, "burn") {
+		// 	log.Printf("   �� Burn operation detected in logs for mint [%d] %s", mintIndex, mintAccount)
+		// 	metrics.RecordTransaction("solana", mintAccount, "success", "burn")
+		// }
 	}
 }
 
