@@ -340,7 +340,13 @@ func processTransaction(logResult *ws.LogResult, mintAccount string, mintIndex i
 		for i, transfer := range transfers {
 			log.Printf("     Transfer [%d]:", i+1)
 			log.Printf("       From: %s (%s)", formatAddress(transfer.From), transfer.From)
+			if transfer.FromOwner != "" && transfer.FromOwner != "unknown" && transfer.FromOwner != "error" && transfer.FromOwner != "not_found" && transfer.FromOwner != "invalid" && transfer.FromOwner != "not_token_account" && transfer.FromOwner != "invalid_data" {
+				log.Printf("         Owner: %s (%s)", formatAddress(transfer.FromOwner), transfer.FromOwner)
+			}
 			log.Printf("       To: %s (%s)", formatAddress(transfer.To), transfer.To)
+			if transfer.ToOwner != "" && transfer.ToOwner != "unknown" && transfer.ToOwner != "error" && transfer.ToOwner != "not_found" && transfer.ToOwner != "invalid" && transfer.ToOwner != "not_token_account" && transfer.ToOwner != "invalid_data" {
+				log.Printf("         Owner: %s (%s)", formatAddress(transfer.ToOwner), transfer.ToOwner)
+			}
 			if transfer.Amount != "" {
 				log.Printf("       Amount: %s", transfer.Amount)
 			}
@@ -513,10 +519,12 @@ func findSubstring(s, substr string) bool {
 
 // TransferInfo contains parsed transfer information
 type TransferInfo struct {
-	From   string
-	To     string
-	Amount string
-	Mint   string
+	From      string
+	To        string
+	Amount    string
+	Mint      string
+	FromOwner string // Owner of the source token account
+	ToOwner   string // Owner of the destination token account
 }
 
 // parseTransferFromLogs extracts transfer information from transaction logs
@@ -827,7 +835,72 @@ func parseSPLTokenInstruction(instruction rpc.CompiledInstruction, accounts []so
 				uint64(instruction.Data[8])<<56
 			transfer.Amount = fmt.Sprintf("%d", amount)
 		}
+
+		// Get token account owners
+		if transfer.From != "" {
+			transfer.FromOwner = getTokenAccountOwner(transfer.From)
+		}
+		if transfer.To != "" {
+			transfer.ToOwner = getTokenAccountOwner(transfer.To)
+		}
 	}
 
 	return transfer
+}
+
+// getTokenAccountOwner gets the owner of a token account
+func getTokenAccountOwner(tokenAccount string) string {
+	if rpcClient == nil {
+		return "unknown"
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	tokenAccountPubkey, err := solana.PublicKeyFromBase58(tokenAccount)
+	if err != nil {
+		if cfg.Verbose {
+			log.Printf("   ⚠️  Invalid token account address: %s", tokenAccount)
+		}
+		return "invalid"
+	}
+
+	// Get account info
+	accountInfo, err := rpcClient.GetAccountInfo(ctx, tokenAccountPubkey)
+	if err != nil {
+		if cfg.Verbose {
+			log.Printf("   ⚠️  Failed to get token account info for %s: %v", tokenAccount, err)
+		}
+		return "error"
+	}
+
+	if accountInfo.Value == nil {
+		if cfg.Verbose {
+			log.Printf("   ⚠️  Token account not found: %s", tokenAccount)
+		}
+		return "not_found"
+	}
+
+	// Check if it's a token account (owned by Token program)
+	if accountInfo.Value.Owner.String() != "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA" {
+		if cfg.Verbose {
+			log.Printf("   ⚠️  Account %s is not a token account (owner: %s)", tokenAccount, accountInfo.Value.Owner.String())
+		}
+		return "not_token_account"
+	}
+
+	// Parse token account data to get owner
+	// Token account data format: mint(32) + owner(32) + amount(8) + delegate(32) + state(1) + is_native(1) + delegated_amount(8) + close_authority(32)
+	if len(accountInfo.Value.Data.GetBinary()) < 64 {
+		if cfg.Verbose {
+			log.Printf("   ⚠️  Token account data too short: %d bytes", len(accountInfo.Value.Data.GetBinary()))
+		}
+		return "invalid_data"
+	}
+
+	// Extract owner (bytes 32-64)
+	ownerBytes := accountInfo.Value.Data.GetBinary()[32:64]
+	ownerPubkey := solana.PublicKeyFromBytes(ownerBytes)
+
+	return ownerPubkey.String()
 }
