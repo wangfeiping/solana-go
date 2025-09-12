@@ -714,9 +714,9 @@ func processTransaction(logResult *ws.LogResult, mintAccount string, mintIndex i
 
 	// Log the transaction details
 	// log.Printf("✅ Transaction found for mint [%d] %s:", mintIndex, mintAccount)
-	log.Printf("   Signature: %s", logResult.Value.Signature.String())
+	// log.Printf("   Signature: %s", logResult.Value.Signature.String())
 	// log.Printf("   Slot: %d", logResult.Context.Slot)
-	log.Printf("   Block Height: %d", logResult.Context.Slot)
+	// log.Printf("   Block Height: %d", logResult.Context.Slot)
 	// log.Printf("   Timestamp: %s", time.Now().Format(time.RFC3339))
 
 	// Parse transfer information from logs
@@ -738,23 +738,30 @@ func processTransaction(logResult *ws.LogResult, mintAccount string, mintIndex i
 
 	if len(transfers) > 0 {
 		// log.Printf("%d ", logResult.Context.Slot)
-		log.Printf("   💸 Transfer Details:")
-		for i, transfer := range transfers {
-			log.Printf("     Transfer [%d]:", i+1)
-			log.Printf("       From: %s (%s)", formatAddress(transfer.From), transfer.From)
+		// log.Printf("   💸 Transfer Details:")
+		for _, transfer := range transfers {
+			fromOwner, toOwner := "", ""
+			// log.Printf("     Transfer [%d]:", i+1)
+			// log.Printf("       From: %s (%s)", formatAddress(transfer.From), transfer.From)
 			if transfer.FromOwner != "" && transfer.FromOwner != "unknown" && transfer.FromOwner != "error" && transfer.FromOwner != "not_found" && transfer.FromOwner != "invalid" && transfer.FromOwner != "not_token_account" && transfer.FromOwner != "invalid_data" {
-				log.Printf("         Owner: %s (%s)", formatAddress(transfer.FromOwner), transfer.FromOwner)
+				// 	log.Printf("         Owner: %s (%s)", formatAddress(transfer.FromOwner), transfer.FromOwner)
+				fromOwner = formatAddress(transfer.FromOwner)
 			}
-			log.Printf("       To: %s (%s)", formatAddress(transfer.To), transfer.To)
+			// log.Printf("       To: %s (%s)", formatAddress(transfer.To), transfer.To)
 			if transfer.ToOwner != "" && transfer.ToOwner != "unknown" && transfer.ToOwner != "error" && transfer.ToOwner != "not_found" && transfer.ToOwner != "invalid" && transfer.ToOwner != "not_token_account" && transfer.ToOwner != "invalid_data" {
-				log.Printf("         Owner: %s (%s)", formatAddress(transfer.ToOwner), transfer.ToOwner)
+				// 	log.Printf("         Owner: %s (%s)", formatAddress(transfer.ToOwner), transfer.ToOwner)
+				toOwner = formatAddress(transfer.ToOwner)
 			}
-			if transfer.Amount != "" {
-				log.Printf("       Amount: %s", transfer.Amount)
-			}
-			if transfer.Mint != "" {
-				log.Printf("       Mint: %s (%s)", formatAddress(transfer.Mint), transfer.Mint)
-			}
+			// if transfer.Amount != "" {
+			// 	log.Printf("       Amount: %s", transfer.Amount)
+			// }
+			// if transfer.Mint != "" {
+			// 	log.Printf("       Mint: %s (%s)", formatAddress(transfer.Mint), transfer.Mint)
+			// }
+			metrics.RecordTransaction("solana", mintAccount, "success", "transfer")
+			log.Printf("WARN %d from: %s(%s) to: %s(%s) %s", logResult.Context.Slot,
+				formatAddress(transfer.From), fromOwner, formatAddress(transfer.To), toOwner,
+				logResult.Value.Signature.String())
 		}
 	}
 
@@ -775,33 +782,33 @@ func processTransaction(logResult *ws.LogResult, mintAccount string, mintIndex i
 		}
 	}
 
-	// Here you can add additional processing logic
-	// For example, save to database, send notifications, etc.
-	analyzeTransactionLogs(logResult.Value.Logs, mintAccount, mintIndex)
+	// // Here you can add additional processing logic
+	// // For example, save to database, send notifications, etc.
+	// analyzeTransactionLogs(logResult.Value.Logs, mintAccount, mintIndex)
 }
 
-func analyzeTransactionLogs(logs []string, mintAccount string, mintIndex int) {
-	// Analyze logs for specific patterns related to the mint account
-	for _, logMsg := range logs {
-		// Look for transfer patterns
-		if contains(logMsg, "Transfer") || contains(logMsg, "transfer") {
-			log.Printf("   🔄 Transfer detected in logs for mint [%d] %s", mintIndex, mintAccount)
-			metrics.RecordTransaction("solana", mintAccount, "success", "transfer")
-		}
+// func analyzeTransactionLogs(logs []string, mintAccount string, mintIndex int) {
+// 	// Analyze logs for specific patterns related to the mint account
+// 	for _, logMsg := range logs {
+// 		// // Look for transfer patterns
+// 		// if contains(logMsg, "Transfer") || contains(logMsg, "transfer") {
+// 		// 	log.Printf("   🔄 Transfer detected in logs for mint [%d] %s", mintIndex, mintAccount)
+// 		// 	metrics.RecordTransaction("solana", mintAccount, "success", "transfer")
+// 		// }
 
-		// // Look for mint patterns
-		// if contains(logMsg, "Mint") || contains(logMsg, "mint") {
-		// 	log.Printf("   🪙 Mint operation detected in logs for mint [%d] %s", mintIndex, mintAccount)
-		// 	metrics.RecordTransaction("solana", mintAccount, "success", "mint")
-		// }
+// 		// // Look for mint patterns
+// 		// if contains(logMsg, "Mint") || contains(logMsg, "mint") {
+// 		// 	log.Printf("   🪙 Mint operation detected in logs for mint [%d] %s", mintIndex, mintAccount)
+// 		// 	metrics.RecordTransaction("solana", mintAccount, "success", "mint")
+// 		// }
 
-		// // Look for burn patterns
-		// if contains(logMsg, "Burn") || contains(logMsg, "burn") {
-		// 	log.Printf("   🔥 Burn operation detected in logs for mint [%d] %s", mintIndex, mintAccount)
-		// 	metrics.RecordTransaction("solana", mintAccount, "success", "burn")
-		// }
-	}
-}
+// 		// // Look for burn patterns
+// 		// if contains(logMsg, "Burn") || contains(logMsg, "burn") {
+// 		// 	log.Printf("   🔥 Burn operation detected in logs for mint [%d] %s", mintIndex, mintAccount)
+// 		// 	metrics.RecordTransaction("solana", mintAccount, "success", "burn")
+// 		// }
+// 	}
+// }
 
 func runStatusCommand(cmd *cobra.Command, args []string) {
 	// Convert WebSocket URL to HTTP RPC URL
