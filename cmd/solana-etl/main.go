@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
@@ -350,6 +351,12 @@ func processSubscription(ctx context.Context, subscription *ws.LogSubscription, 
 			}
 
 			// Process the log result
+			jsonLogResult, err := json.Marshal(logResult)
+			if err != nil {
+				log.Printf("Error marshalling log result: %v", err)
+				continue
+			}
+			log.Printf("subscription mint %s log result: %s", mintAccount, string(jsonLogResult))
 			processTransaction(logResult, mintAccount, mintIndex)
 		}
 	}
@@ -696,7 +703,7 @@ func processTransaction(logResult *ws.LogResult, mintAccount string, mintIndex i
 
 	// Check if transaction was successful
 	if logResult.Value.Err != nil {
-		metrics.RecordTransaction("solana", mintAccount, "failed", "unknown")
+		// metrics.RecordTransaction("solana", mintAccount, "failed", "unknown")
 		if cfg.Verbose {
 			log.Printf("❌ Failed transaction for mint [%d] %s: %s (Error: %v)",
 				mintIndex, mintAccount, logResult.Value.Signature.String(), logResult.Value.Err)
@@ -710,7 +717,7 @@ func processTransaction(logResult *ws.LogResult, mintAccount string, mintIndex i
 	// }
 
 	// Update successful transaction metric
-	metrics.RecordTransaction("solana", mintAccount, "success", "unknown")
+	// metrics.RecordTransaction("solana", mintAccount, "success", "unknown")
 
 	// Log the transaction details
 	// log.Printf("✅ Transaction found for mint [%d] %s:", mintIndex, mintAccount)
