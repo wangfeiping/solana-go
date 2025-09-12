@@ -21,6 +21,7 @@ type Config struct {
 	Exporter     string   // Prometheus exporter 地址
 	MonitorSOL   bool     // 是否监听SOL转账
 	RPCLimitRate int      // RPC调用频率限制 (每秒请求数)
+	QueueSize    int      // 消息队列大小
 }
 
 // System Program ID for SOL transfers
@@ -37,6 +38,7 @@ func NewConfig() *Config {
 		Exporter:     ":20000",
 		MonitorSOL:   false,
 		RPCLimitRate: 10,
+		QueueSize:    2000,
 	}
 }
 

@@ -17,6 +17,7 @@ import (
 	"github.com/gagliardetto/solana-go"
 	"github.com/gagliardetto/solana-go/etl/config"
 	"github.com/gagliardetto/solana-go/etl/exporter"
+	"github.com/gagliardetto/solana-go/etl/queue"
 	"github.com/gagliardetto/solana-go/rpc"
 	"github.com/gagliardetto/solana-go/rpc/ws"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -28,6 +29,9 @@ var metrics *exporter.Metrics
 
 // Global RPC client for getting transaction details
 var rpcClient *config.RateLimitedRPCClient
+
+// Global message queue
+var messageQueue *queue.MessageQueue
 
 var (
 	cfg     = config.NewConfig()
@@ -79,8 +83,13 @@ func init() {
 		"Also monitor SOL transfers (System Program transactions). This is automatically enabled when System Program ID is included in mint-account list")
 
 	// 添加 RPC 频率限制参数
-	rootCmd.PersistentFlags().IntVar(&cfg.RPCLimitRate, "rpc-limit-rate", 10,
+	// 添加 RPC 频率限制参数
+	rootCmd.PersistentFlags().IntVarP(&cfg.RPCLimitRate, "rpc-limit-rate", "r", 10,
 		"RPC call rate limit (requests per second)")
+
+	// 添加队列大小参数
+	rootCmd.PersistentFlags().IntVarP(&cfg.QueueSize, "queue", "q", 2000,
+		"Message queue size for buffering received messages")
 }
 
 var startCmd = &cobra.Command{
@@ -147,6 +156,13 @@ func startMetricsServer(ctx context.Context, addr string) {
 
 func runStartCommand(cmd *cobra.Command, args []string) {
 	// Parse mint accounts
+
+	// Initialize message queue
+	log.Printf("Initializing message queue with size: %d", cfg.QueueSize)
+	messageQueue = queue.NewMessageQueue(cfg.QueueSize)
+
+	// Start queue processor
+	go messageQueue.ProcessQueue(processMessageQueueItem)
 	if cfg.MintAccount == "" && !cfg.MonitorSOL {
 		log.Fatal("Error: mint-account is required or enable SOL monitoring. Use -m or --mint-account flag with '11111111111111111111111111111111' to monitor SOL transfers, or --monitor-sol flag.")
 	}
@@ -346,7 +362,14 @@ func processSubscription(ctx context.Context, subscription *ws.LogSubscription, 
 				}
 				log.Printf("subscription mint %s log result: %s", mintAccount, string(jsonLogResult))
 			}
-			processTransaction(logResult, mintAccount, mintIndex)
+			item := queue.MessageQueueItem{
+				LogResult:        logResult,
+				MintAccount:      mintAccount,
+				SubscriptionType: subscriptionType,
+			}
+			if !messageQueue.Send(item) {
+				log.Printf("⚠️ Message queue is full, dropping message for mint [%d] %s", mintIndex, mintAccount)
+			}
 		}
 	}
 }
@@ -391,7 +414,14 @@ func processSOLSubscription(ctx context.Context, subscription *ws.LogSubscriptio
 				}
 				log.Printf("subscription SOL log result: %s", string(jsonLogResult))
 			}
-			processSOLTransaction(logResult)
+			item := queue.MessageQueueItem{
+				LogResult:        logResult,
+				MintAccount:      "",
+				SubscriptionType: "sol",
+			}
+			if !messageQueue.Send(item) {
+				log.Printf("⚠️ Message queue is full, dropping SOL transfer message")
+			}
 		}
 	}
 }
@@ -411,14 +441,6 @@ func processSOLTransaction(logResult *ws.LogResult) {
 		return
 	}
 
-	// Update successful transaction metric
-	metrics.RecordTransaction("solana", "SOL", "success", "transfer")
-
-	// Log the transaction details
-	log.Printf("💰 SOL Transfer found:")
-	log.Printf("   Signature: %s", logResult.Value.Signature.String())
-	log.Printf("   Block Height: %d", logResult.Context.Slot)
-
 	// 添加调试信息：显示原始日志
 	if cfg.Verbose {
 		log.Printf("   🔍 Debug: Raw transaction logs:")
@@ -431,16 +453,28 @@ func processSOLTransaction(logResult *ws.LogResult) {
 	solTransfers := getSOLTransferDetails(logResult.Value.Signature, logResult.Value.Logs)
 
 	if len(solTransfers) > 0 {
-		log.Printf("   💸 SOL Transfer Details:")
-		for i, transfer := range solTransfers {
-			log.Printf("     Transfer [%d]:", i+1)
-			log.Printf("       From: %s (%s)", formatAddress(transfer.From), transfer.From)
-			log.Printf("       To: %s (%s)", formatAddress(transfer.To), transfer.To)
-			if transfer.Amount != "" {
-				log.Printf("       Amount: %s SOL", transfer.Amount)
-			}
+		// Update successful transaction metric
+		metrics.RecordTransaction("solana", "SOL", "success", "transfer")
+
+		// log.Printf("   💸 SOL Transfer Details:")
+		for _, transfer := range solTransfers {
+			// log.Printf("     Transfer [%d]:", i+1)
+			// log.Printf("       From: %s (%s)", formatAddress(transfer.From), transfer.From)
+			// log.Printf("       To: %s (%s)", formatAddress(transfer.To), transfer.To)
+			// if transfer.Amount != "" {
+			// 	log.Printf("       Amount: %s SOL", transfer.Amount)
+			// }
+			log.Printf("WARN %d from: %s to: %s %s", logResult.Context.Slot,
+				formatAddress(transfer.From), formatAddress(transfer.To), logResult.Value.Signature.String())
 		}
 	} else {
+		if !cfg.Verbose {
+			return
+		}
+		// Log the transaction details
+		log.Printf("💰 SOL Transfer found:")
+		log.Printf("   Signature: %s", logResult.Value.Signature.String())
+		log.Printf("   Block Height: %d", logResult.Context.Slot)
 		// If no transfers were parsed, try to extract addresses from logs as fallback
 		log.Printf("    SOL Transfer Details (from logs):")
 
@@ -692,19 +726,24 @@ func parseSystemProgramInstruction(instruction solana.CompiledInstruction, accou
 	return transfer
 }
 
-func processTransaction(logResult *ws.LogResult, mintAccount string, mintIndex int) {
+func processTransaction(logResult *ws.LogResult, mintAccount string) {
 	// 更新区块高度监控指标
 	// 在 Solana 中，slot 和 block height 是相关的概念
 	// 这里使用 slot 作为区块高度的近似值
 	metrics.UpdateBlockHeight("solana", float64(logResult.Context.Slot))
 
-	// Check if transaction was successful
+	// // Check if transaction was successful
+	// if logResult.Value.Err != nil {
+	// 	// metrics.RecordTransaction("solana", mintAccount, "failed", "unknown")
+	// 	if cfg.Verbose {
+	// 		log.Printf("❌ Failed transaction for mint [%d] %s: %s (Error: %v)",
+	// 			mintIndex, mintAccount, logResult.Value.Signature.String(), logResult.Value.Err)
+	// 	}
+	// 	return
+	// }
 	if logResult.Value.Err != nil {
-		// metrics.RecordTransaction("solana", mintAccount, "failed", "unknown")
-		if cfg.Verbose {
-			log.Printf("❌ Failed transaction for mint [%d] %s: %s (Error: %v)",
-				mintIndex, mintAccount, logResult.Value.Signature.String(), logResult.Value.Err)
-		}
+		log.Printf("ERROR failed transaction for mint: %s %v)",
+			logResult.Value.Signature.String(), logResult.Value.Err)
 		return
 	}
 
@@ -1335,5 +1374,15 @@ func debugAddressParsing(logs []string) {
 		} else {
 			log.Printf("     Log [%d]: %s (no addresses found)", i, logMsg)
 		}
+	}
+}
+
+// processMessageQueueItem processes a single message from the queue
+func processMessageQueueItem(item queue.MessageQueueItem) {
+	// Process the queued message
+	if item.SubscriptionType == "sol" {
+		processSOLTransaction(item.LogResult)
+	} else {
+		processTransaction(item.LogResult, item.MintAccount)
 	}
 }
