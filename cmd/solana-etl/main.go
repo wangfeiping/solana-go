@@ -20,10 +20,12 @@ import (
 	"github.com/gagliardetto/solana-go/rpc/ws"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/spf13/cobra"
+	"golang.org/x/time/rate"
 )
 
 type Config struct {
-	ProviderURL  string
+	WSSURL       string // WebSocket URL
+	RPCURL       string // RPC URL
 	StartBlock   uint64
 	MintAccount  string   // 原始输入字符串
 	MintAccounts []string // 解析后的 mint 账户列表
@@ -31,16 +33,79 @@ type Config struct {
 	Verbose      bool
 	Exporter     string // Prometheus exporter 地址
 	MonitorSOL   bool   // 是否监听SOL转账
+	RPCLimitRate int    // RPC调用频率限制 (每秒请求数)
 }
 
 // Global metrics instance
 var metrics *exporter.Metrics
 
 // Global RPC client for getting transaction details
-var rpcClient *rpc.Client
+var rpcClient *RateLimitedRPCClient
 
 // System Program ID for SOL transfers
 const SystemProgramID = "11111111111111111111111111111111"
+
+// RateLimitedRPCClient wraps the RPC client with rate limiting
+type RateLimitedRPCClient struct {
+	client  *rpc.Client
+	limiter *rate.Limiter
+}
+
+// NewRateLimitedRPCClient creates a new rate-limited RPC client
+func NewRateLimitedRPCClient(rpcURL string, rps int) *RateLimitedRPCClient {
+	client := rpc.New(rpcURL)
+	limiter := rate.NewLimiter(rate.Limit(rps), rps) // Allow burst up to rps
+
+	return &RateLimitedRPCClient{
+		client:  client,
+		limiter: limiter,
+	}
+}
+
+// GetTransaction wraps the RPC call with rate limiting
+func (r *RateLimitedRPCClient) GetTransaction(ctx context.Context, signature solana.Signature, opts *rpc.GetTransactionOpts) (*rpc.GetTransactionResult, error) {
+	if err := r.limiter.Wait(ctx); err != nil {
+		return nil, err
+	}
+	return r.client.GetTransaction(ctx, signature, opts)
+}
+
+// GetAccountInfo wraps the RPC call with rate limiting
+func (r *RateLimitedRPCClient) GetAccountInfo(ctx context.Context, account solana.PublicKey) (*rpc.GetAccountInfoResult, error) {
+	if err := r.limiter.Wait(ctx); err != nil {
+		return nil, err
+	}
+	return r.client.GetAccountInfo(ctx, account)
+}
+
+// GetHealth wraps the RPC call with rate limiting
+func (r *RateLimitedRPCClient) GetHealth(ctx context.Context) (string, error) {
+	if err := r.limiter.Wait(ctx); err != nil {
+		return "", err
+	}
+	return r.client.GetHealth(ctx)
+}
+
+// GetSlot wraps the RPC call with rate limiting
+func (r *RateLimitedRPCClient) GetSlot(ctx context.Context, commitment rpc.CommitmentType) (uint64, error) {
+	if err := r.limiter.Wait(ctx); err != nil {
+		return 0, err
+	}
+	return r.client.GetSlot(ctx, commitment)
+}
+
+// GetEpochInfo wraps the RPC call with rate limiting
+func (r *RateLimitedRPCClient) GetEpochInfo(ctx context.Context, commitment rpc.CommitmentType) (*rpc.GetEpochInfoResult, error) {
+	if err := r.limiter.Wait(ctx); err != nil {
+		return nil, err
+	}
+	return r.client.GetEpochInfo(ctx, commitment)
+}
+
+// Close closes the underlying RPC client
+func (r *RateLimitedRPCClient) Close() error {
+	return r.client.Close()
+}
 
 var (
 	cfg     = &Config{}
@@ -62,9 +127,13 @@ func init() {
 	rootCmd.AddCommand(statusCmd)
 
 	// Global flags for all commands
-	rootCmd.PersistentFlags().StringVarP(&cfg.ProviderURL, "provider", "p",
+	rootCmd.PersistentFlags().StringVarP(&cfg.WSSURL, "wss", "w",
 		"wss://api.mainnet-beta.solana.com",
 		"Solana WebSocket provider URL")
+
+	rootCmd.PersistentFlags().StringVarP(&cfg.RPCURL, "provider", "p",
+		"https://api.mainnet-beta.solana.com",
+		"Solana RPC provider URL")
 
 	rootCmd.PersistentFlags().Uint64VarP(&cfg.StartBlock, "start-block", "s", 0,
 		"Start monitoring from this block number (slot)")
@@ -86,6 +155,10 @@ func init() {
 	// 添加 SOL 转账监听参数 (现在可以通过包含System Program ID自动启用)
 	rootCmd.PersistentFlags().BoolVar(&cfg.MonitorSOL, "monitor-sol", false,
 		"Also monitor SOL transfers (System Program transactions). This is automatically enabled when System Program ID is included in mint-account list")
+
+	// 添加 RPC 频率限制参数
+	rootCmd.PersistentFlags().IntVar(&cfg.RPCLimitRate, "rpc-limit-rate", 10,
+		"RPC call rate limit (requests per second)")
 }
 
 var startCmd = &cobra.Command{
@@ -205,15 +278,10 @@ func runStartCommand(cmd *cobra.Command, args []string) {
 		log.Printf("Also monitoring SOL transfers (System Program: %s)", SystemProgramID)
 	}
 
-	// Initialize RPC client for getting transaction details
-	rpcURL := cfg.ProviderURL
-	if rpcURL[:3] == "wss" {
-		rpcURL = "https" + rpcURL[3:]
-	} else if rpcURL[:2] == "ws" {
-		rpcURL = "http" + rpcURL[2:]
-	}
-	rpcClient = rpc.New(rpcURL)
-	log.Printf("Initialized RPC client: %s", rpcURL)
+	// Initialize rate-limited RPC client for getting transaction details
+	log.Printf("Initializing RPC client with rate limit: %d requests/second", cfg.RPCLimitRate)
+	log.Printf("RPC URL: %s", cfg.RPCURL)
+	rpcClient = NewRateLimitedRPCClient(cfg.RPCURL, cfg.RPCLimitRate)
 
 	// Create context with cancellation
 	ctx, cancel := context.WithCancel(context.Background())
@@ -234,8 +302,8 @@ func runStartCommand(cmd *cobra.Command, args []string) {
 	}()
 
 	// Connect to WebSocket
-	log.Printf("Connecting to Solana WebSocket at: %s", cfg.ProviderURL)
-	client, err := ws.Connect(ctx, cfg.ProviderURL)
+	log.Printf("Connecting to Solana WebSocket at: %s", cfg.WSSURL)
+	client, err := ws.Connect(ctx, cfg.WSSURL)
 	if err != nil {
 		log.Fatalf("Failed to connect to WebSocket: %v", err)
 		metrics.SetConnectionStatus("solana", 0)
@@ -828,19 +896,12 @@ func processTransaction(logResult *ws.LogResult, mintAccount string, mintIndex i
 // }
 
 func runStatusCommand(cmd *cobra.Command, args []string) {
-	// Convert WebSocket URL to HTTP RPC URL
-	rpcURL := cfg.ProviderURL
-	if rpcURL[:3] == "wss" {
-		rpcURL = "https" + rpcURL[3:]
-	} else if rpcURL[:2] == "ws" {
-		rpcURL = "http" + rpcURL[2:]
-	}
-
 	log.Printf("Checking Solana network status...")
-	log.Printf("RPC URL: %s", rpcURL)
+	log.Printf("RPC URL: %s", cfg.RPCURL)
+	log.Printf("RPC Rate Limit: %d requests/second", cfg.RPCLimitRate)
 
-	// Create RPC client
-	client := rpc.New(rpcURL)
+	// Create rate-limited RPC client
+	client := NewRateLimitedRPCClient(cfg.RPCURL, cfg.RPCLimitRate)
 
 	// Get network status
 	ctx := context.Background()
