@@ -159,7 +159,7 @@ func runStartCommand(cmd *cobra.Command, args []string) {
 
 	// Initialize message queue
 	log.Printf("Initializing message queue with size: %d", cfg.QueueSize)
-	messageQueue = queue.NewMessageQueue(cfg.QueueSize)
+	messageQueue = queue.NewMessageQueueWithMetrics(cfg.QueueSize, metrics, "solana")
 
 	// Start queue processor
 	go messageQueue.ProcessQueue(processMessageQueueItem)

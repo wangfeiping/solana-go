@@ -16,6 +16,7 @@ type Metrics struct {
 	BlockHeight        *prometheus.GaugeVec
 	SubscriptionsActive *prometheus.GaugeVec
 	ConnectionStatus   *prometheus.GaugeVec
+	LogsQueue          *prometheus.GaugeVec
 }
 
 // NewMetrics creates a new Metrics instance with all Prometheus metrics
@@ -52,6 +53,14 @@ func NewMetrics() *Metrics {
 			},
 			[]string{"chain"},
 		),
+
+		LogsQueue: prometheus.NewGaugeVec(
+			prometheus.GaugeOpts{
+				Name: fmt.Sprintf("%s_logs_queue", PREFIX),
+				Help: "Current number of messages in the processing queue",
+			},
+			[]string{"chain", "size"},
+		),
 	}
 
 	// Register all metrics
@@ -59,6 +68,7 @@ func NewMetrics() *Metrics {
 	prometheus.MustRegister(metrics.BlockHeight)
 	prometheus.MustRegister(metrics.SubscriptionsActive)
 	prometheus.MustRegister(metrics.ConnectionStatus)
+	prometheus.MustRegister(metrics.LogsQueue)
 
 	return metrics
 }
@@ -81,4 +91,9 @@ func (m *Metrics) SetSubscriptionActive(chain string, active float64) {
 // SetConnectionStatus sets the connection status
 func (m *Metrics) SetConnectionStatus(chain string, status float64) {
 	m.ConnectionStatus.WithLabelValues(chain).Set(status)
+}
+
+// UpdateLogsQueue updates the logs queue metric
+func (m *Metrics) UpdateLogsQueue(chain, size string, count float64) {
+	m.LogsQueue.WithLabelValues(chain, size).Set(count)
 }
