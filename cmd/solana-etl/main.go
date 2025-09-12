@@ -351,12 +351,14 @@ func processSubscription(ctx context.Context, subscription *ws.LogSubscription, 
 			}
 
 			// Process the log result
-			jsonLogResult, err := json.Marshal(logResult)
-			if err != nil {
-				log.Printf("Error marshalling log result: %v", err)
-				continue
+			if cfg.Verbose {
+				jsonLogResult, err := json.Marshal(logResult)
+				if err != nil {
+					log.Printf("Error marshalling log result: %v", err)
+					continue
+				}
+				log.Printf("subscription mint %s log result: %s", mintAccount, string(jsonLogResult))
 			}
-			log.Printf("subscription mint %s log result: %s", mintAccount, string(jsonLogResult))
 			processTransaction(logResult, mintAccount, mintIndex)
 		}
 	}
@@ -394,6 +396,14 @@ func processSOLSubscription(ctx context.Context, subscription *ws.LogSubscriptio
 			}
 
 			// Process the SOL transfer result
+			if cfg.Verbose {
+				jsonLogResult, err := json.Marshal(logResult)
+				if err != nil {
+					log.Printf("Error marshalling log result: %v", err)
+					continue
+				}
+				log.Printf("subscription SOL log result: %s", string(jsonLogResult))
+			}
 			processSOLTransaction(logResult)
 		}
 	}
