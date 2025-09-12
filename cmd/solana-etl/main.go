@@ -29,6 +29,7 @@ type Config struct {
 	Commitment   string
 	Verbose      bool
 	Exporter     string // Prometheus exporter 地址
+	MonitorSOL   bool   // 是否监听SOL转账
 }
 
 // Global metrics instance
@@ -36,6 +37,9 @@ var metrics *exporter.Metrics
 
 // Global RPC client for getting transaction details
 var rpcClient *rpc.Client
+
+// System Program ID for SOL transfers
+const SystemProgramID = "11111111111111111111111111111111"
 
 var (
 	cfg     = &Config{}
@@ -66,7 +70,7 @@ func init() {
 
 	// 支持多个 mint 账户，用逗号分隔
 	rootCmd.PersistentFlags().StringVarP(&cfg.MintAccount, "mint-account", "m", "",
-		"Mint account address(es) to monitor (comma-separated for multiple accounts)")
+		"Mint account address(es) to monitor (comma-separated for multiple accounts). Include '11111111111111111111111111111111' to monitor SOL transfers")
 
 	rootCmd.PersistentFlags().StringVarP(&cfg.Commitment, "commitment", "c", "confirmed",
 		"Commitment level: processed, confirmed, or finalized")
@@ -77,6 +81,10 @@ func init() {
 	// 添加 exporter 参数
 	rootCmd.PersistentFlags().StringVar(&cfg.Exporter, "exporter", ":20000",
 		"Prometheus exporter address in format ip:port for metrics export")
+
+	// 添加 SOL 转账监听参数 (现在可以通过包含System Program ID自动启用)
+	rootCmd.PersistentFlags().BoolVar(&cfg.MonitorSOL, "monitor-sol", false,
+		"Also monitor SOL transfers (System Program transactions). This is automatically enabled when System Program ID is included in mint-account list")
 }
 
 var startCmd = &cobra.Command{
@@ -143,29 +151,57 @@ func startMetricsServer(ctx context.Context, addr string) {
 
 func runStartCommand(cmd *cobra.Command, args []string) {
 	// Parse mint accounts
-	if cfg.MintAccount == "" {
-		log.Fatal("Error: mint-account is required. Use -m or --mint-account flag.")
+	if cfg.MintAccount == "" && !cfg.MonitorSOL {
+		log.Fatal("Error: mint-account is required or enable SOL monitoring. Use -m or --mint-account flag with '11111111111111111111111111111111' to monitor SOL transfers, or --monitor-sol flag.")
 	}
 
 	// 解析多个 mint 账户
-	cfg.MintAccounts = parseMintAccounts(cfg.MintAccount)
-	if len(cfg.MintAccounts) == 0 {
-		log.Fatal("Error: no valid mint accounts provided")
+	if cfg.MintAccount != "" {
+		cfg.MintAccounts = parseMintAccounts(cfg.MintAccount)
+		if len(cfg.MintAccounts) == 0 {
+			log.Fatal("Error: no valid mint accounts provided")
+		}
+
+		// 检查是否包含System Program ID，如果包含则自动启用SOL监听
+		for _, mintAccount := range cfg.MintAccounts {
+			if mintAccount == SystemProgramID {
+				cfg.MonitorSOL = true
+				log.Printf("🔍 Detected System Program ID (%s) in mint accounts, automatically enabling SOL transfer monitoring", SystemProgramID)
+				break
+			}
+		}
 	}
 
-	// Validate mint accounts
-	mintPubkeys := make([]solana.PublicKey, 0, len(cfg.MintAccounts))
+	// Validate mint accounts (排除System Program ID，因为它不是真正的mint账户)
+	validMintAccounts := make([]string, 0)
+	mintPubkeys := make([]solana.PublicKey, 0)
+
 	for i, mintAccount := range cfg.MintAccounts {
+		if mintAccount == SystemProgramID {
+			log.Printf("  [%d] %s (System Program - SOL transfers)", i+1, mintAccount)
+			continue // 跳过System Program ID，不加入mint监听列表
+		}
+
 		mintPubkey, err := solana.PublicKeyFromBase58(mintAccount)
 		if err != nil {
 			log.Fatalf("Invalid mint account address at position %d: %s - %v", i+1, mintAccount, err)
 		}
+		validMintAccounts = append(validMintAccounts, mintAccount)
 		mintPubkeys = append(mintPubkeys, mintPubkey)
 	}
 
-	log.Printf("Monitoring %d mint account(s):", len(cfg.MintAccounts))
-	for i, mintAccount := range cfg.MintAccounts {
-		log.Printf("  [%d] %s", i+1, mintAccount)
+	// 更新有效的mint账户列表
+	cfg.MintAccounts = validMintAccounts
+
+	if len(cfg.MintAccounts) > 0 {
+		log.Printf("Monitoring %d mint account(s):", len(cfg.MintAccounts))
+		for i, mintAccount := range cfg.MintAccounts {
+			log.Printf("  [%d] %s", i+1, mintAccount)
+		}
+	}
+
+	if cfg.MonitorSOL {
+		log.Printf("Also monitoring SOL transfers (System Program: %s)", SystemProgramID)
 	}
 
 	// Initialize RPC client for getting transaction details
@@ -204,6 +240,7 @@ func runStartCommand(cmd *cobra.Command, args []string) {
 		metrics.SetConnectionStatus("solana", 0)
 	} else {
 		metrics.SetConnectionStatus("solana", 1)
+		log.Printf("✅ Successfully connected to WebSocket")
 	}
 	defer client.Close()
 
@@ -221,6 +258,7 @@ func runStartCommand(cmd *cobra.Command, args []string) {
 			log.Printf("Unknown commitment level: %s, using confirmed", cfg.Commitment)
 		}
 	}
+	log.Printf("Using commitment level: %s", cfg.Commitment)
 
 	// 为每个 mint 账户创建订阅
 	var wg sync.WaitGroup
@@ -243,8 +281,34 @@ func runStartCommand(cmd *cobra.Command, args []string) {
 		go func(sub *ws.LogSubscription, mintAccount string, mintIndex int) {
 			defer wg.Done()
 			defer metrics.SetSubscriptionActive("solana", 0)
-			processSubscription(ctx, sub, mintAccount, mintIndex)
+			processSubscription(ctx, sub, mintAccount, mintIndex, "mint")
 		}(subscription, cfg.MintAccounts[i], i+1)
+	}
+
+	// 如果启用了SOL监听，创建System Program订阅
+	if cfg.MonitorSOL {
+		systemProgramPubkey, err := solana.PublicKeyFromBase58(SystemProgramID)
+		if err != nil {
+			log.Fatalf("Invalid System Program ID: %v", err)
+		}
+
+		log.Printf("Subscribing to SOL transfers (System Program): %s", SystemProgramID)
+		solSubscription, err := client.LogsSubscribeMentions(systemProgramPubkey, commitment)
+		if err != nil {
+			log.Fatalf("Failed to subscribe to System Program logs: %v", err)
+		}
+		defer solSubscription.Unsubscribe()
+
+		// Update metrics
+		metrics.SetSubscriptionActive("solana", 1)
+
+		// 启动SOL转账监听goroutine
+		wg.Add(1)
+		go func(sub *ws.LogSubscription) {
+			defer wg.Done()
+			defer metrics.SetSubscriptionActive("solana", 0)
+			processSOLSubscription(ctx, sub)
+		}(solSubscription)
 	}
 
 	log.Printf("Starting to monitor transactions from block %d...", cfg.StartBlock)
@@ -255,7 +319,9 @@ func runStartCommand(cmd *cobra.Command, args []string) {
 	log.Println("All subscriptions stopped")
 }
 
-func processSubscription(ctx context.Context, subscription *ws.LogSubscription, mintAccount string, mintIndex int) {
+func processSubscription(ctx context.Context, subscription *ws.LogSubscription, mintAccount string, mintIndex int, subscriptionType string) {
+	log.Printf("🔄 Subscription [%d] started for mint %s (type: %s)", mintIndex, mintAccount, subscriptionType)
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -270,6 +336,9 @@ func processSubscription(ctx context.Context, subscription *ws.LogSubscription, 
 			if err != nil {
 				if err == context.DeadlineExceeded {
 					// No message received within timeout, continue
+					if cfg.Verbose {
+						log.Printf("⏰ No message received for mint [%d] %s within 30s timeout", mintIndex, mintAccount)
+					}
 					continue
 				}
 				if err == context.Canceled {
@@ -284,6 +353,339 @@ func processSubscription(ctx context.Context, subscription *ws.LogSubscription, 
 			processTransaction(logResult, mintAccount, mintIndex)
 		}
 	}
+}
+
+// processSOLSubscription 处理SOL转账订阅
+func processSOLSubscription(ctx context.Context, subscription *ws.LogSubscription) {
+	log.Printf("🔄 SOL transfer subscription started")
+
+	for {
+		select {
+		case <-ctx.Done():
+			log.Printf("SOL transfer subscription cancelled")
+			return
+		default:
+			// Set a timeout for receiving messages
+			recvCtx, recvCancel := context.WithTimeout(ctx, 30*time.Second)
+			logResult, err := subscription.Recv(recvCtx)
+			recvCancel()
+
+			if err != nil {
+				if err == context.DeadlineExceeded {
+					// No message received within timeout, continue
+					if cfg.Verbose {
+						log.Printf("⏰ No SOL transfer message received within 30s timeout")
+					}
+					continue
+				}
+				if err == context.Canceled {
+					log.Printf("SOL transfer subscription cancelled")
+					return
+				}
+				log.Printf("Error receiving SOL transfer message: %v", err)
+				continue
+			}
+
+			// Process the SOL transfer result
+			processSOLTransaction(logResult)
+		}
+	}
+}
+
+// processSOLTransaction 处理SOL转账交易
+func processSOLTransaction(logResult *ws.LogResult) {
+	// 更新区块高度监控指标
+	metrics.UpdateBlockHeight("solana", float64(logResult.Context.Slot))
+
+	// Check if transaction was successful
+	if logResult.Value.Err != nil {
+		metrics.RecordTransaction("solana", "SOL", "failed", "unknown")
+		if cfg.Verbose {
+			log.Printf("❌ Failed SOL transaction: %s (Error: %v)",
+				logResult.Value.Signature.String(), logResult.Value.Err)
+		}
+		return
+	}
+
+	// Update successful transaction metric
+	metrics.RecordTransaction("solana", "SOL", "success", "transfer")
+
+	// Log the transaction details
+	log.Printf("💰 SOL Transfer found:")
+	log.Printf("   Signature: %s", logResult.Value.Signature.String())
+	log.Printf("   Block Height: %d", logResult.Context.Slot)
+
+	// 添加调试信息：显示原始日志
+	if cfg.Verbose {
+		log.Printf("   🔍 Debug: Raw transaction logs:")
+		for i, logMsg := range logResult.Value.Logs {
+			log.Printf("     [%d] %s", i, logMsg)
+		}
+	}
+
+	// Parse SOL transfer information
+	solTransfers := getSOLTransferDetails(logResult.Value.Signature, logResult.Value.Logs)
+
+	if len(solTransfers) > 0 {
+		log.Printf("   💸 SOL Transfer Details:")
+		for i, transfer := range solTransfers {
+			log.Printf("     Transfer [%d]:", i+1)
+			log.Printf("       From: %s (%s)", formatAddress(transfer.From), transfer.From)
+			log.Printf("       To: %s (%s)", formatAddress(transfer.To), transfer.To)
+			if transfer.Amount != "" {
+				log.Printf("       Amount: %s SOL", transfer.Amount)
+			}
+		}
+	} else {
+		// If no transfers were parsed, try to extract addresses from logs as fallback
+		log.Printf("    SOL Transfer Details (from logs):")
+
+		// First try to get addresses from logs (excluding System Program)
+		addresses := parseAccountAddresses(logResult.Value.Logs)
+
+		if cfg.Verbose {
+			log.Printf("   🔍 Debug: parseAccountAddresses found %d addresses: %v", len(addresses), addresses)
+		}
+
+		// If that fails, try to get ALL addresses including System Program
+		if len(addresses) < 2 {
+			allAddresses := parseAllAccountAddresses(logResult.Value.Logs)
+
+			if cfg.Verbose {
+				log.Printf("   🔍 Debug: parseAllAccountAddresses found %d addresses: %v", len(allAddresses), allAddresses)
+			}
+
+			if len(allAddresses) >= 2 {
+				log.Printf("       From: %s (%s)", formatAddress(allAddresses[0]), allAddresses[0])
+				log.Printf("       To: %s (%s)", formatAddress(allAddresses[1]), allAddresses[1])
+			} else {
+				log.Printf("       ⚠️  Could not extract from/to addresses")
+
+				// 尝试从RPC获取交易详情作为最后的fallback
+				if rpcClient != nil {
+					if cfg.Verbose {
+						log.Printf("   🔍 Debug: Attempting RPC fallback for address extraction...")
+					}
+					rpcTransfers := getSOLTransferDetailsFromRPC(logResult.Value.Signature)
+					if len(rpcTransfers) > 0 {
+						log.Printf("   💸 SOL Transfer Details (from RPC):")
+						for i, transfer := range rpcTransfers {
+							log.Printf("     Transfer [%d]:", i+1)
+							log.Printf("       From: %s (%s)", formatAddress(transfer.From), transfer.From)
+							log.Printf("       To: %s (%s)", formatAddress(transfer.To), transfer.To)
+							if transfer.Amount != "" {
+								log.Printf("       Amount: %s SOL", transfer.Amount)
+							}
+						}
+					} else {
+						log.Printf("       ⚠️  RPC fallback also failed to extract addresses")
+					}
+				}
+			}
+		} else {
+			log.Printf("       From: %s (%s)", formatAddress(addresses[0]), addresses[0])
+			log.Printf("       To: %s (%s)", formatAddress(addresses[1]), addresses[1])
+		}
+	}
+}
+
+// SOLTransferInfo contains parsed SOL transfer information
+type SOLTransferInfo struct {
+	From   string
+	To     string
+	Amount string
+}
+
+// getSOLTransferDetails gets SOL transfer details from transaction data
+func getSOLTransferDetails(signature solana.Signature, logs []string) []SOLTransferInfo {
+	var transfers []SOLTransferInfo
+
+	// First try to parse from logs
+	transfers = parseSOLTransferFromLogs(logs)
+
+	// If log parsing failed, try to get details from RPC
+	if len(transfers) == 0 && rpcClient != nil {
+		if cfg.Verbose {
+			log.Printf("   🔍 Debug: Attempting to get SOL transaction details from RPC...")
+		}
+		rpcTransfers := getSOLTransferDetailsFromRPC(signature)
+		if len(rpcTransfers) > 0 {
+			transfers = rpcTransfers
+			if cfg.Verbose {
+				log.Printf("   🔍 Debug: Successfully got %d SOL transfers from RPC", len(transfers))
+			}
+		} else {
+			if cfg.Verbose {
+				log.Printf("   🔍 Debug: Failed to get SOL transfers from RPC")
+			}
+		}
+	}
+
+	return transfers
+}
+
+// parseSOLTransferFromLogs extracts SOL transfer information from transaction logs
+func parseSOLTransferFromLogs(logs []string) []SOLTransferInfo {
+	var transfers []SOLTransferInfo
+
+	// Common patterns for SOL transfer logs in Solana
+	patterns := []struct {
+		name    string
+		pattern *regexp.Regexp
+	}{
+		{
+			name:    "sol_transfer",
+			pattern: regexp.MustCompile(`Transfer (\d+) lamports from ([A-Za-z0-9]{32,44}) to ([A-Za-z0-9]{32,44})`),
+		},
+		{
+			name:    "system_program_transfer",
+			pattern: regexp.MustCompile(`Program 11111111111111111111111111111111 invoke \[1\]: Transfer`),
+		},
+	}
+
+	for _, logMsg := range logs {
+		for _, pattern := range patterns {
+			matches := pattern.pattern.FindStringSubmatch(logMsg)
+			if len(matches) >= 4 && pattern.name == "sol_transfer" {
+				transfer := SOLTransferInfo{}
+				amountLamports := matches[1]
+				var amount uint64
+				if _, err := fmt.Sscanf(amountLamports, "%d", &amount); err == nil {
+					transfer.Amount = fmt.Sprintf("%.9f", float64(amount)/1e9) // Convert lamports to SOL
+				}
+				transfer.From = matches[2]
+				transfer.To = matches[3]
+				transfers = append(transfers, transfer)
+			} else if pattern.name == "system_program_transfer" && len(matches) > 0 {
+				// System program transfer detected, need to get details from RPC
+				transfer := SOLTransferInfo{
+					From:   "detected",
+					To:     "detected",
+					Amount: "detected",
+				}
+				transfers = append(transfers, transfer)
+			}
+		}
+	}
+
+	return transfers
+}
+
+// getSOLTransferDetailsFromRPC gets SOL transfer details from RPC transaction data
+func getSOLTransferDetailsFromRPC(signature solana.Signature) []SOLTransferInfo {
+	var transfers []SOLTransferInfo
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// Get complete transaction information
+	tx, err := rpcClient.GetTransaction(ctx, signature, &rpc.GetTransactionOpts{
+		Encoding:                       solana.EncodingBase64,
+		Commitment:                     rpc.CommitmentConfirmed,
+		MaxSupportedTransactionVersion: &[]uint64{0}[0],
+	})
+	if err != nil {
+		if cfg.Verbose {
+			log.Printf("   ⚠️  Failed to get SOL transaction details: %v", err)
+		}
+		return transfers
+	}
+
+	if tx == nil || tx.Transaction == nil {
+		if cfg.Verbose {
+			log.Printf("   ⚠️  SOL transaction envelope is nil")
+		}
+		return transfers
+	}
+
+	// Parse transaction account information
+	transaction, err := tx.Transaction.GetTransaction()
+	if err != nil {
+		if cfg.Verbose {
+			log.Printf("   ⚠️  Failed to get SOL transaction from envelope: %v", err)
+		}
+		return transfers
+	}
+
+	if transaction == nil {
+		if cfg.Verbose {
+			log.Printf("   ⚠️  SOL transaction is nil")
+		}
+		return transfers
+	}
+
+	// Get account list
+	txAccounts := transaction.Message.AccountKeys
+	if len(txAccounts) < 2 {
+		if cfg.Verbose {
+			log.Printf("   ⚠️  Not enough accounts in SOL transaction: %d", len(txAccounts))
+		}
+		return transfers
+	}
+
+	// Find System Program transfer instructions
+	for i, instruction := range transaction.Message.Instructions {
+		if instruction.ProgramIDIndex < uint16(len(txAccounts)) {
+			programID := txAccounts[instruction.ProgramIDIndex]
+
+			if cfg.Verbose {
+				log.Printf("   🔍 Debug: SOL Instruction [%d] program: %s", i, programID.String())
+			}
+
+			// Check if it's System Program
+			if programID.String() == SystemProgramID {
+				if cfg.Verbose {
+					log.Printf("   🔍 Debug: Found System Program instruction with %d accounts", len(instruction.Accounts))
+				}
+
+				transfer := parseSystemProgramInstruction(instruction, txAccounts)
+				if transfer.From != "" && transfer.To != "" {
+					transfers = append(transfers, transfer)
+					if cfg.Verbose {
+						log.Printf("   🔍 Debug: Parsed SOL transfer: %s -> %s, amount: %s",
+							transfer.From, transfer.To, transfer.Amount)
+					}
+				}
+			}
+		}
+	}
+
+	return transfers
+}
+
+// parseSystemProgramInstruction parses System Program instruction to extract SOL transfer info
+func parseSystemProgramInstruction(instruction solana.CompiledInstruction, accounts []solana.PublicKey) SOLTransferInfo {
+	transfer := SOLTransferInfo{}
+
+	// System Program Transfer instruction format:
+	// 0: source (system account)
+	// 1: destination (system account)
+
+	if len(instruction.Accounts) >= 2 {
+		// Get source and destination accounts
+		if int(instruction.Accounts[0]) < len(accounts) {
+			transfer.From = accounts[instruction.Accounts[0]].String()
+		}
+		if int(instruction.Accounts[1]) < len(accounts) {
+			transfer.To = accounts[instruction.Accounts[1]].String()
+		}
+
+		// Try to parse amount from instruction data
+		if len(instruction.Data) >= 12 {
+			// System Program Transfer instruction data format: instruction type(4 bytes) + amount(8 bytes)
+			amount := uint64(instruction.Data[4]) |
+				uint64(instruction.Data[5])<<8 |
+				uint64(instruction.Data[6])<<16 |
+				uint64(instruction.Data[7])<<24 |
+				uint64(instruction.Data[8])<<32 |
+				uint64(instruction.Data[9])<<40 |
+				uint64(instruction.Data[10])<<48 |
+				uint64(instruction.Data[11])<<56
+			transfer.Amount = fmt.Sprintf("%.9f", float64(amount)/1e9) // Convert lamports to SOL
+		}
+	}
+
+	return transfer
 }
 
 func processTransaction(logResult *ws.LogResult, mintAccount string, mintIndex int) {
@@ -395,7 +797,7 @@ func analyzeTransactionLogs(logs []string, mintAccount string, mintIndex int) {
 
 		// // Look for burn patterns
 		// if contains(logMsg, "Burn") || contains(logMsg, "burn") {
-		// 	log.Printf("   �� Burn operation detected in logs for mint [%d] %s", mintIndex, mintAccount)
+		// 	log.Printf("   🔥 Burn operation detected in logs for mint [%d] %s", mintIndex, mintAccount)
 		// 	metrics.RecordTransaction("solana", mintAccount, "success", "burn")
 		// }
 	}
@@ -904,4 +1306,50 @@ func getTokenAccountOwner(tokenAccount string) string {
 	ownerPubkey := solana.PublicKeyFromBytes(ownerBytes)
 
 	return ownerPubkey.String()
+}
+
+// parseAllAccountAddresses extracts ALL account addresses from transaction logs (including System Program)
+func parseAllAccountAddresses(logs []string) []string {
+	var addresses []string
+	addressSet := make(map[string]bool)
+
+	// Pattern to match Solana addresses (32-44 characters, base58)
+	addressPattern := regexp.MustCompile(`[1-9A-HJ-NP-Za-km-z]{32,44}`)
+
+	for _, logMsg := range logs {
+		matches := addressPattern.FindAllString(logMsg, -1)
+		for _, match := range matches {
+			// Don't filter out any addresses, include System Program
+			if !addressSet[match] && len(match) >= 32 && len(match) <= 44 {
+				addresses = append(addresses, match)
+				addressSet[match] = true
+			}
+		}
+	}
+
+	return addresses
+}
+
+// debugAddressParsing 详细分析地址解析过程
+func debugAddressParsing(logs []string) {
+	if !cfg.Verbose {
+		return
+	}
+
+	log.Printf("   🔍 Debug: Detailed address parsing analysis:")
+	addressPattern := regexp.MustCompile(`[1-9A-HJ-NP-Za-km-z]{32,44}`)
+
+	for i, logMsg := range logs {
+		matches := addressPattern.FindAllString(logMsg, -1)
+		if len(matches) > 0 {
+			log.Printf("     Log [%d]: %s", i, logMsg)
+			log.Printf("       Found potential addresses: %v", matches)
+			for _, match := range matches {
+				isCommon := isCommonNonAddress(match)
+				log.Printf("         '%s': length=%d, isCommon=%v", match, len(match), isCommon)
+			}
+		} else {
+			log.Printf("     Log [%d]: %s (no addresses found)", i, logMsg)
+		}
+	}
 }
