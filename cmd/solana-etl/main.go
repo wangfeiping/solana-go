@@ -15,100 +15,22 @@ import (
 	"time"
 
 	"github.com/gagliardetto/solana-go"
+	"github.com/gagliardetto/solana-go/etl/config"
 	"github.com/gagliardetto/solana-go/etl/exporter"
 	"github.com/gagliardetto/solana-go/rpc"
 	"github.com/gagliardetto/solana-go/rpc/ws"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/spf13/cobra"
-	"golang.org/x/time/rate"
 )
-
-type Config struct {
-	WSSURL       string // WebSocket URL
-	RPCURL       string // RPC URL
-	StartBlock   uint64
-	MintAccount  string   // 原始输入字符串
-	MintAccounts []string // 解析后的 mint 账户列表
-	Commitment   string
-	Verbose      bool
-	Exporter     string // Prometheus exporter 地址
-	MonitorSOL   bool   // 是否监听SOL转账
-	RPCLimitRate int    // RPC调用频率限制 (每秒请求数)
-}
 
 // Global metrics instance
 var metrics *exporter.Metrics
 
 // Global RPC client for getting transaction details
-var rpcClient *RateLimitedRPCClient
-
-// System Program ID for SOL transfers
-const SystemProgramID = "11111111111111111111111111111111"
-
-// RateLimitedRPCClient wraps the RPC client with rate limiting
-type RateLimitedRPCClient struct {
-	client  *rpc.Client
-	limiter *rate.Limiter
-}
-
-// NewRateLimitedRPCClient creates a new rate-limited RPC client
-func NewRateLimitedRPCClient(rpcURL string, rps int) *RateLimitedRPCClient {
-	client := rpc.New(rpcURL)
-	limiter := rate.NewLimiter(rate.Limit(rps), rps) // Allow burst up to rps
-
-	return &RateLimitedRPCClient{
-		client:  client,
-		limiter: limiter,
-	}
-}
-
-// GetTransaction wraps the RPC call with rate limiting
-func (r *RateLimitedRPCClient) GetTransaction(ctx context.Context, signature solana.Signature, opts *rpc.GetTransactionOpts) (*rpc.GetTransactionResult, error) {
-	if err := r.limiter.Wait(ctx); err != nil {
-		return nil, err
-	}
-	return r.client.GetTransaction(ctx, signature, opts)
-}
-
-// GetAccountInfo wraps the RPC call with rate limiting
-func (r *RateLimitedRPCClient) GetAccountInfo(ctx context.Context, account solana.PublicKey) (*rpc.GetAccountInfoResult, error) {
-	if err := r.limiter.Wait(ctx); err != nil {
-		return nil, err
-	}
-	return r.client.GetAccountInfo(ctx, account)
-}
-
-// GetHealth wraps the RPC call with rate limiting
-func (r *RateLimitedRPCClient) GetHealth(ctx context.Context) (string, error) {
-	if err := r.limiter.Wait(ctx); err != nil {
-		return "", err
-	}
-	return r.client.GetHealth(ctx)
-}
-
-// GetSlot wraps the RPC call with rate limiting
-func (r *RateLimitedRPCClient) GetSlot(ctx context.Context, commitment rpc.CommitmentType) (uint64, error) {
-	if err := r.limiter.Wait(ctx); err != nil {
-		return 0, err
-	}
-	return r.client.GetSlot(ctx, commitment)
-}
-
-// GetEpochInfo wraps the RPC call with rate limiting
-func (r *RateLimitedRPCClient) GetEpochInfo(ctx context.Context, commitment rpc.CommitmentType) (*rpc.GetEpochInfoResult, error) {
-	if err := r.limiter.Wait(ctx); err != nil {
-		return nil, err
-	}
-	return r.client.GetEpochInfo(ctx, commitment)
-}
-
-// Close closes the underlying RPC client
-func (r *RateLimitedRPCClient) Close() error {
-	return r.client.Close()
-}
+var rpcClient *config.RateLimitedRPCClient
 
 var (
-	cfg     = &Config{}
+	cfg     = config.NewConfig()
 	rootCmd = &cobra.Command{
 		Use:   "solana-etl",
 		Short: "Solana WebSocket event monitor for mint account transactions",
@@ -231,18 +153,15 @@ func runStartCommand(cmd *cobra.Command, args []string) {
 
 	// 解析多个 mint 账户
 	if cfg.MintAccount != "" {
-		cfg.MintAccounts = parseMintAccounts(cfg.MintAccount)
+		cfg.ParseMintAccounts()
 		if len(cfg.MintAccounts) == 0 {
 			log.Fatal("Error: no valid mint accounts provided")
 		}
 
 		// 检查是否包含System Program ID，如果包含则自动启用SOL监听
-		for _, mintAccount := range cfg.MintAccounts {
-			if mintAccount == SystemProgramID {
-				cfg.MonitorSOL = true
-				log.Printf("🔍 Detected System Program ID (%s) in mint accounts, automatically enabling SOL transfer monitoring", SystemProgramID)
-				break
-			}
+		cfg.CheckForSystemProgram()
+		if cfg.MonitorSOL {
+			log.Printf("🔍 Detected System Program ID (%s) in mint accounts, automatically enabling SOL transfer monitoring", config.SystemProgramID)
 		}
 	}
 
@@ -251,7 +170,7 @@ func runStartCommand(cmd *cobra.Command, args []string) {
 	mintPubkeys := make([]solana.PublicKey, 0)
 
 	for i, mintAccount := range cfg.MintAccounts {
-		if mintAccount == SystemProgramID {
+		if mintAccount == config.SystemProgramID {
 			log.Printf("  [%d] %s (System Program - SOL transfers)", i+1, mintAccount)
 			continue // 跳过System Program ID，不加入mint监听列表
 		}
@@ -275,13 +194,13 @@ func runStartCommand(cmd *cobra.Command, args []string) {
 	}
 
 	if cfg.MonitorSOL {
-		log.Printf("Also monitoring SOL transfers (System Program: %s)", SystemProgramID)
+		log.Printf("Also monitoring SOL transfers (System Program: %s)", config.SystemProgramID)
 	}
 
 	// Initialize rate-limited RPC client for getting transaction details
 	log.Printf("Initializing RPC client with rate limit: %d requests/second", cfg.RPCLimitRate)
 	log.Printf("RPC URL: %s", cfg.RPCURL)
-	rpcClient = NewRateLimitedRPCClient(cfg.RPCURL, cfg.RPCLimitRate)
+	rpcClient = config.NewRateLimitedRPCClient(cfg.RPCURL, cfg.RPCLimitRate)
 
 	// Create context with cancellation
 	ctx, cancel := context.WithCancel(context.Background())
@@ -356,12 +275,12 @@ func runStartCommand(cmd *cobra.Command, args []string) {
 
 	// 如果启用了SOL监听，创建System Program订阅
 	if cfg.MonitorSOL {
-		systemProgramPubkey, err := solana.PublicKeyFromBase58(SystemProgramID)
+		systemProgramPubkey, err := solana.PublicKeyFromBase58(config.SystemProgramID)
 		if err != nil {
 			log.Fatalf("Invalid System Program ID: %v", err)
 		}
 
-		log.Printf("Subscribing to SOL transfers (System Program): %s", SystemProgramID)
+		log.Printf("Subscribing to SOL transfers (System Program): %s", config.SystemProgramID)
 		solSubscription, err := client.LogsSubscribeMentions(systemProgramPubkey, commitment)
 		if err != nil {
 			log.Fatalf("Failed to subscribe to System Program logs: %v", err)
@@ -718,7 +637,7 @@ func getSOLTransferDetailsFromRPC(signature solana.Signature) []SOLTransferInfo 
 			}
 
 			// Check if it's System Program
-			if programID.String() == SystemProgramID {
+			if programID.String() == config.SystemProgramID {
 				if cfg.Verbose {
 					log.Printf("   🔍 Debug: Found System Program instruction with %d accounts", len(instruction.Accounts))
 				}
@@ -901,7 +820,7 @@ func runStatusCommand(cmd *cobra.Command, args []string) {
 	log.Printf("RPC Rate Limit: %d requests/second", cfg.RPCLimitRate)
 
 	// Create rate-limited RPC client
-	client := NewRateLimitedRPCClient(cfg.RPCURL, cfg.RPCLimitRate)
+	client := config.NewRateLimitedRPCClient(cfg.RPCURL, cfg.RPCLimitRate)
 
 	// Get network status
 	ctx := context.Background()
@@ -932,7 +851,7 @@ func runStatusCommand(cmd *cobra.Command, args []string) {
 	// Check mint accounts if provided
 	if cfg.MintAccount != "" {
 		// Parse mint accounts
-		cfg.MintAccounts = parseMintAccounts(cfg.MintAccount)
+		cfg.ParseMintAccounts()
 
 		log.Printf("\nChecking %d mint account(s):", len(cfg.MintAccounts))
 		for i, mintAccount := range cfg.MintAccounts {
@@ -965,26 +884,6 @@ func runStatusCommand(cmd *cobra.Command, args []string) {
 	if cfg.Exporter != "" {
 		log.Printf("\n📊 Prometheus metrics available at: http://%s/metrics", cfg.Exporter)
 	}
-}
-
-// parseMintAccounts 解析逗号分隔的 mint 账户字符串
-func parseMintAccounts(mintAccountStr string) []string {
-	if mintAccountStr == "" {
-		return nil
-	}
-
-	// 按逗号分割并清理空白字符
-	accounts := strings.Split(mintAccountStr, ",")
-	result := make([]string, 0, len(accounts))
-
-	for _, account := range accounts {
-		account = strings.TrimSpace(account)
-		if account != "" {
-			result = append(result, account)
-		}
-	}
-
-	return result
 }
 
 func contains(s, substr string) bool {
