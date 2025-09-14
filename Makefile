@@ -17,10 +17,11 @@ help:
 	@echo "  make all      - 执行 deps + test + build"
 
 # 下载依赖
-deps:
-	@echo "下载 Go 模块依赖..."
-	go mod download
-	go mod tidy
+#deps:
+#	@echo "下载 Go 模块依赖..."
+#	go mod download
+#	go mod tidy
+#	go mod vendor
 
 # 运行测试
 test:
@@ -50,7 +51,7 @@ install:
 	@echo "构建 CLI 工具 (solana-etl)..."
 	# go build -o ./build/solana-etl ./cmd/solana-etl/
 	# sudo mv ./build/solana-etl $(shell go env GOBIN)/
-	go install ./cmd/solana-etl/
+	go install --mod=vendor ./cmd/solana-etl/
 
 # 清理构建文件
 clean:
