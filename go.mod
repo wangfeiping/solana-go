@@ -7,6 +7,7 @@ require (
 	github.com/gagliardetto/gofuzz v1.2.2
 	github.com/gagliardetto/treeout v0.1.4
 	github.com/google/uuid v1.6.0
+	github.com/matryer/resync v0.0.0-20161211202428-d39c09a11215
 	github.com/prometheus/client_golang v0.9.3
 )
 
@@ -15,6 +16,7 @@ require (
 	github.com/andres-erbsen/clock v0.0.0-20160526145045-9e14626cd129 // indirect
 	github.com/beorn7/perks v1.0.0 // indirect
 	github.com/blendle/zapdriver v1.3.1 // indirect
+	github.com/cheekybits/is v0.0.0-20150225183255-68e9c0620927 // indirect
 	github.com/daaku/go.zipexe v1.0.0 // indirect
 	github.com/fsnotify/fsnotify v1.4.7 // indirect
 	github.com/golang/groupcache v0.0.0-20200121045136-8c9f03a8e57e // indirect

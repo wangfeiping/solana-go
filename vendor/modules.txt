@@ -24,6 +24,8 @@ github.com/blendle/zapdriver
 # github.com/buger/jsonparser v1.1.1
 ## explicit; go 1.13
 github.com/buger/jsonparser
+# github.com/cheekybits/is v0.0.0-20150225183255-68e9c0620927
+## explicit
 # github.com/daaku/go.zipexe v1.0.0
 ## explicit; go 1.12
 github.com/daaku/go.zipexe
@@ -113,6 +115,9 @@ github.com/logrusorgru/aurora
 # github.com/magiconair/properties v1.8.1
 ## explicit
 github.com/magiconair/properties
+# github.com/matryer/resync v0.0.0-20161211202428-d39c09a11215
+## explicit
+github.com/matryer/resync
 # github.com/mattn/go-colorable v0.1.4
 ## explicit
 github.com/mattn/go-colorable

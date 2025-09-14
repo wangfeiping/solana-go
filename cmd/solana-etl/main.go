@@ -16,6 +16,7 @@ import (
 
 	"github.com/gagliardetto/solana-go"
 	"github.com/gagliardetto/solana-go/etl/config"
+	"github.com/gagliardetto/solana-go/etl/criptobox"
 	"github.com/gagliardetto/solana-go/etl/exporter"
 	"github.com/gagliardetto/solana-go/etl/queue"
 	"github.com/gagliardetto/solana-go/rpc"
@@ -464,8 +465,15 @@ func processSOLTransaction(logResult *ws.LogResult) {
 			// if transfer.Amount != "" {
 			// 	log.Printf("       Amount: %s SOL", transfer.Amount)
 			// }
-			log.Printf("WARN %d from: %s to: %s %s", logResult.Context.Slot,
-				formatAddress(transfer.From), formatAddress(transfer.To), logResult.Value.Signature.String())
+			msg := criptobox.TxMsg{
+				Slot:      logResult.Context.Slot,
+				Signature: logResult.Value.Signature.String(),
+				FromOwner: transfer.From,
+				ToOwner:   transfer.To,
+			}
+
+			log.Printf("WARN %d from: %s to: %s %s", msg.Slot,
+				formatAddress(msg.FromOwner), formatAddress(msg.ToOwner), msg.Signature)
 		}
 	} else {
 		if !cfg.Verbose {
