@@ -91,6 +91,10 @@ func init() {
 	// 添加队列大小参数
 	rootCmd.PersistentFlags().IntVarP(&cfg.QueueSize, "queue", "q", 2000,
 		"Message queue size for buffering received messages")
+
+	// 添加 API 参数
+	rootCmd.PersistentFlags().StringVarP(&cfg.API, "api", "a", "",
+		"CriptoBox API URL for sending transaction messages")
 }
 
 var startCmd = &cobra.Command{
@@ -156,6 +160,12 @@ func startMetricsServer(ctx context.Context, addr string) {
 }
 
 func runStartCommand(cmd *cobra.Command, args []string) {
+	// Set CriptoBox API URL if provided
+	if cfg.API != "" {
+		criptobox.SetRpc(cfg.API)
+		log.Printf("CriptoBox API URL set to: %s", cfg.API)
+	}
+
 	// Parse mint accounts
 
 	// Initialize message queue
@@ -457,6 +467,7 @@ func processSOLTransaction(logResult *ws.LogResult) {
 		// Update successful transaction metric
 		metrics.RecordTransaction("solana", "SOL", "success", "transfer")
 
+		var err error
 		// log.Printf("   💸 SOL Transfer Details:")
 		for _, transfer := range solTransfers {
 			// log.Printf("     Transfer [%d]:", i+1)
@@ -472,8 +483,10 @@ func processSOLTransaction(logResult *ws.LogResult) {
 				ToOwner:   transfer.To,
 			}
 
-			log.Printf("WARN %d from: %s to: %s %s", msg.Slot,
-				formatAddress(msg.FromOwner), formatAddress(msg.ToOwner), msg.Signature)
+			err = criptobox.RegisterTxMsg(&msg)
+			if err != nil {
+				log.Printf("ERROR %d %s %v", msg.Slot, msg.Signature, err)
+			}
 		}
 	} else {
 		if !cfg.Verbose {
@@ -790,29 +803,39 @@ func processTransaction(logResult *ws.LogResult, mintAccount string) {
 	if len(transfers) > 0 {
 		// log.Printf("%d ", logResult.Context.Slot)
 		// log.Printf("   💸 Transfer Details:")
+		metrics.RecordTransaction("solana", mintAccount, "success", "transfer")
+
+		var err error
 		for _, transfer := range transfers {
-			fromOwner, toOwner := "", ""
-			// log.Printf("     Transfer [%d]:", i+1)
-			// log.Printf("       From: %s (%s)", formatAddress(transfer.From), transfer.From)
-			if transfer.FromOwner != "" && transfer.FromOwner != "unknown" && transfer.FromOwner != "error" && transfer.FromOwner != "not_found" && transfer.FromOwner != "invalid" && transfer.FromOwner != "not_token_account" && transfer.FromOwner != "invalid_data" {
-				// 	log.Printf("         Owner: %s (%s)", formatAddress(transfer.FromOwner), transfer.FromOwner)
-				fromOwner = formatAddress(transfer.FromOwner)
-			}
-			// log.Printf("       To: %s (%s)", formatAddress(transfer.To), transfer.To)
-			if transfer.ToOwner != "" && transfer.ToOwner != "unknown" && transfer.ToOwner != "error" && transfer.ToOwner != "not_found" && transfer.ToOwner != "invalid" && transfer.ToOwner != "not_token_account" && transfer.ToOwner != "invalid_data" {
-				// 	log.Printf("         Owner: %s (%s)", formatAddress(transfer.ToOwner), transfer.ToOwner)
-				toOwner = formatAddress(transfer.ToOwner)
-			}
-			// if transfer.Amount != "" {
-			// 	log.Printf("       Amount: %s", transfer.Amount)
+			// fromOwner, toOwner := "", ""
+			// // log.Printf("     Transfer [%d]:", i+1)
+			// // log.Printf("       From: %s (%s)", formatAddress(transfer.From), transfer.From)
+			// if transfer.FromOwner != "" && transfer.FromOwner != "unknown" && transfer.FromOwner != "error" && transfer.FromOwner != "not_found" && transfer.FromOwner != "invalid" && transfer.FromOwner != "not_token_account" && transfer.FromOwner != "invalid_data" {
+			// 	// 	log.Printf("         Owner: %s (%s)", formatAddress(transfer.FromOwner), transfer.FromOwner)
+			// 	fromOwner = formatAddress(transfer.FromOwner)
 			// }
-			// if transfer.Mint != "" {
-			// 	log.Printf("       Mint: %s (%s)", formatAddress(transfer.Mint), transfer.Mint)
+			// // log.Printf("       To: %s (%s)", formatAddress(transfer.To), transfer.To)
+			// if transfer.ToOwner != "" && transfer.ToOwner != "unknown" && transfer.ToOwner != "error" && transfer.ToOwner != "not_found" && transfer.ToOwner != "invalid" && transfer.ToOwner != "not_token_account" && transfer.ToOwner != "invalid_data" {
+			// 	// 	log.Printf("         Owner: %s (%s)", formatAddress(transfer.ToOwner), transfer.ToOwner)
+			// 	toOwner = formatAddress(transfer.ToOwner)
 			// }
-			metrics.RecordTransaction("solana", mintAccount, "success", "transfer")
-			log.Printf("WARN %d from: %s(%s) to: %s(%s) %s", logResult.Context.Slot,
-				formatAddress(transfer.From), fromOwner, formatAddress(transfer.To), toOwner,
-				logResult.Value.Signature.String())
+			// // if transfer.Amount != "" {
+			// // 	log.Printf("       Amount: %s", transfer.Amount)
+			// // }
+			// // if transfer.Mint != "" {
+			// // 	log.Printf("       Mint: %s (%s)", formatAddress(transfer.Mint), transfer.Mint)
+			// // }
+
+			msg := criptobox.TxMsg{
+				Slot:      logResult.Context.Slot,
+				Signature: logResult.Value.Signature.String(),
+				FromOwner: transfer.FromOwner,
+				ToOwner:   transfer.ToOwner,
+			}
+			err = criptobox.RegisterTxMsg(&msg)
+			if err != nil {
+				log.Printf("ERROR %d %s %v", msg.Slot, msg.Signature, err)
+			}
 		}
 	}
 

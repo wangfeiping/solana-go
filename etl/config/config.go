@@ -13,6 +13,7 @@ import (
 type Config struct {
 	WSSURL       string   // WebSocket URL
 	RPCURL       string   // RPC URL
+	API          string   // CriptoBox API URL
 	StartBlock   uint64   // Start monitoring from this block number (slot)
 	MintAccount  string   // 原始输入字符串
 	MintAccounts []string // 解析后的 mint 账户列表
@@ -32,6 +33,7 @@ func NewConfig() *Config {
 	return &Config{
 		WSSURL:       "wss://api.mainnet-beta.solana.com",
 		RPCURL:       "https://api.mainnet-beta.solana.com",
+		API:          "",  // No default API URL
 		StartBlock:   0,
 		Commitment:   "confirmed",
 		Verbose:      false,

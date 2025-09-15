@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/url"
+	"time"
 
 	"github.com/gagliardetto/solana-go/etl/http"
 )
@@ -35,8 +37,32 @@ type AddressList struct {
 	Addresses []string `json:"addresses"`
 }
 
+func RegisterTxMsg(msg *TxMsg) error {
+	addrs, err := QueryAddrs([]string{msg.FromOwner, msg.ToOwner})
+	if err != nil {
+		return err
+	}
+	if len(addrs) <= 0 {
+		return fmt.Errorf("non-related Tx")
+	}
+
+	for {
+		err = PostTxMsgRequest(msg)
+		if err != nil {
+			log.Printf("ERROR %d %s %v", msg.Slot, msg.Signature, err)
+			time.Sleep(100 * time.Millisecond)
+			continue
+		}
+		break
+	}
+
+	log.Printf("WARN %d from: %s to: %s %s", msg.Slot,
+		formatAddress(msg.FromOwner), formatAddress(msg.ToOwner), msg.Signature)
+	return nil
+}
+
 func QueryAddrs(addrs []string) ([]string, error) {
-	rpc, err := url.JoinPath(rpc, "/api/v1/tron/addresses")
+	rpc, err := url.JoinPath(rpc, "/api/v1/solana/addresses")
 	if err != nil {
 		return nil, err
 	}
@@ -72,7 +98,7 @@ func QueryAddrs(addrs []string) ([]string, error) {
 }
 
 func PostTxMsgRequest(msg *TxMsg) error {
-	rpc, err := url.JoinPath(rpc, "/api/v1/tron/message")
+	rpc, err := url.JoinPath(rpc, "/api/v1/solana/message")
 	if err != nil {
 		return err
 	}
@@ -103,4 +129,16 @@ func PostTxMsgRequest(msg *TxMsg) error {
 	}
 	return nil
 	// return fmt.Errorf("not implemented")
+}
+
+// formatAddress shortens an address for display
+func formatAddress(address string) string {
+	// if len(address) <= 12 {
+	// 	return address
+	// }
+	// return address[:4] + "..." + address[len(address)-4:]
+	if len(address) <= 6 {
+		return address
+	}
+	return address[len(address)-6:]
 }
