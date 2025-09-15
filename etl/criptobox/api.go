@@ -34,6 +34,19 @@ type ApiResp struct {
 	Result           []string `json:"result,omitempty"`
 }
 
+type RegisterResult struct {
+	TxHash uint64 `json:"tx_hash"`
+}
+
+type RegisterTxMsgResp struct {
+	ErrorCode        *int64          `json:"error_code"`
+	ErrorDescription *string         `json:"error_description"`
+	ErrorID          *string         `json:"error_id"`
+	ErrorMessage     *string         `json:"error_message"`
+	Success          *bool           `json:"success"`
+	Result           *RegisterResult `json:"result,omitempty"`
+}
+
 type AddressList struct {
 	Addresses []string `json:"addresses"`
 }
@@ -124,7 +137,7 @@ func PostTxMsgRequest(msg *TxMsg) error {
 		return err
 	}
 
-	var result ApiResp
+	var result RegisterTxMsgResp
 	if err := json.Unmarshal(resp, &result); err != nil {
 		log.Printf("ERROR %v %s", string(resp), err)
 		return err
