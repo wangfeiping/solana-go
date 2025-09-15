@@ -87,6 +87,8 @@ func QueryAddrs(addrs []string) ([]string, error) {
 		return nil, err
 	}
 
+	log.Printf("resp: %s", string(resp))
+
 	var result ApiResp
 	if err := json.Unmarshal(resp, &result); err != nil {
 		log.Printf("ERROR %v %s", string(resp), err)
