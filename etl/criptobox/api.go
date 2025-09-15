@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net/url"
+	"strings"
 	"time"
 
 	"github.com/gagliardetto/solana-go/etl/http"
@@ -88,6 +89,7 @@ func QueryAddrs(addrs []string) ([]string, error) {
 
 	var result ApiResp
 	if err := json.Unmarshal(resp, &result); err != nil {
+		log.Printf("ERROR %v %s", string(resp), err)
 		return nil, err
 	}
 	if !*result.Success {
@@ -125,6 +127,9 @@ func PostTxMsgRequest(msg *TxMsg) error {
 		return err
 	}
 	if !*result.Success {
+		if strings.Contains(*result.ErrorMessage, "tx_hash already exists") {
+			return nil
+		}
 		return fmt.Errorf("failed to post Tx msg request: %s", *result.ErrorMessage)
 	}
 	return nil
