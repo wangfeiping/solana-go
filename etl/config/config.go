@@ -9,6 +9,8 @@ import (
 	"golang.org/x/time/rate"
 )
 
+var Version = "v0.0.0"
+
 // Config contains all configuration options for the Solana ETL tool
 type Config struct {
 	WSSURL       string   // WebSocket URL
@@ -33,7 +35,7 @@ func NewConfig() *Config {
 	return &Config{
 		WSSURL:       "wss://api.mainnet-beta.solana.com",
 		RPCURL:       "https://api.mainnet-beta.solana.com",
-		API:          "",  // No default API URL
+		API:          "", // No default API URL
 		StartBlock:   0,
 		Commitment:   "confirmed",
 		Verbose:      false,

@@ -51,6 +51,7 @@ with transaction details, logs, and operation analysis.`,
 func init() {
 	// Add commands
 	rootCmd.AddCommand(startCmd)
+	rootCmd.AddCommand(versionCmd)
 	rootCmd.AddCommand(statusCmd)
 
 	// Global flags for all commands
@@ -113,6 +114,13 @@ var statusCmd = &cobra.Command{
 This command will connect to the RPC endpoint and retrieve information about
 the network status and mint account details.`,
 	Run: runStatusCommand,
+}
+
+var versionCmd = &cobra.Command{
+	Use:   "version",
+	Short: "Print version information",
+	Long:  "Print the version information of solana-etl",
+	Run:   runVersionCommand,
 }
 
 func main() {
@@ -954,6 +962,11 @@ func runStatusCommand(cmd *cobra.Command, args []string) {
 	if cfg.Exporter != "" {
 		log.Printf("\n📊 Prometheus metrics available at: http://%s/metrics", cfg.Exporter)
 	}
+}
+
+// runVersionCommand prints the version information
+func runVersionCommand(cmd *cobra.Command, args []string) {
+	fmt.Printf("%s\n", config.Version)
 }
 
 func contains(s, substr string) bool {

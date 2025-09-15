@@ -3,6 +3,10 @@
 
 VERSION := $(shell git describe --tags --match *-criptobox | sed -e 's/^\(v[0-9]\{1,\}\.[0-9]\{1,\}\)\.[0-9a-x]\{1,\}\(-.*-g[0-9a-f]\{1,\}\)$$/\1.\2/' | sed 's/-criptobox-//')
 
+
+ldflags = -X github.com/gagliardetto/solana-go/etl/config.Version=$(VERSION)
+BUILD_FLAGS := -ldflags '$(ldflags)' -trimpath
+
 .PHONY: all build test clean install deps help
 
 # 默认目标
@@ -54,7 +58,7 @@ install:
 	# go build -o ./build/solana-etl ./cmd/solana-etl/
 	# sudo mv ./build/solana-etl $(shell go env GOBIN)/
 	echo ${VERSION}
-	go install --mod=vendor ./cmd/solana-etl/
+	go install --mod=vendor $(BUILD_FLAGS) ./cmd/solana-etl/
 
 # 清理构建文件
 clean:
