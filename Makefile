@@ -1,6 +1,8 @@
 # Solana-Go 项目 Makefile
 # 提供标准的构建、测试和清理命令
 
+VERSION := $(shell git describe --tags --match *-criptobox | sed -e 's/^\(v[0-9]\{1,\}\.[0-9]\{1,\}\)\.[0-9a-x]\{1,\}\(-.*-g[0-9a-f]\{1,\}\)$$/\1.\2/' | sed 's/-criptobox-//')
+
 .PHONY: all build test clean install deps help
 
 # 默认目标
@@ -51,6 +53,7 @@ install:
 	@echo "构建 CLI 工具 (solana-etl)..."
 	# go build -o ./build/solana-etl ./cmd/solana-etl/
 	# sudo mv ./build/solana-etl $(shell go env GOBIN)/
+	echo ${VERSION}
 	go install --mod=vendor ./cmd/solana-etl/
 
 # 清理构建文件
