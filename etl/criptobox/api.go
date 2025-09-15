@@ -35,7 +35,7 @@ type ApiResp struct {
 }
 
 type RegisterResult struct {
-	TxHash uint64 `json:"tx_hash"`
+	TxHash string `json:"tx_hash"`
 }
 
 type RegisterTxMsgResp struct {
